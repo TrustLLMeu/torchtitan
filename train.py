@@ -41,6 +41,64 @@ def _get_batch(data_iterator, device_type):
     return input_ids, labels, data_loading_time, batch_ntokens
 
 
+def _batch_backward(
+        model_parts,
+        input_ids,
+        labels,
+        train_spec,
+        train_context,
+        parallel_dims,
+        world_mesh,
+        pp_schedule,
+        has_first_stage,
+        has_last_stage,
+        device,
+        job_config,
+):
+    # apply context parallelism if cp is enabled
+    # ensure CP handles the separate freqs_cis buffer for each pp stage
+    optional_context_parallel_ctx = (
+        dist_utils.create_context_parallel_ctx(
+            cp_mesh=world_mesh["cp"],
+            cp_buffers=[input_ids, labels] + [m.freqs_cis for m in model_parts],
+            cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+            cp_no_restore_buffers={input_ids, labels},
+            cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
+        )
+        if parallel_dims.cp_enabled
+        else None
+    )
+
+    if parallel_dims.pp_enabled:
+        # Pipeline Parallel forward / backward inside step() call
+        with train_context(optional_context_parallel_ctx):
+            targets, losses = (labels, []) if has_last_stage else (None, None)
+            if has_first_stage:
+                pp_schedule.step(input_ids, target=targets, losses=losses)
+            else:
+                pp_schedule.step(target=targets, losses=losses)
+
+        # accumulate losses across pipeline microbatches
+        # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+        loss = (
+            torch.mean(torch.stack(losses)).to(device)
+            if has_last_stage
+            else torch.tensor([-1.0], device=device)
+        )
+    else:
+        model = model_parts[0]
+
+        # Non-PP forward / backward
+        with train_context(optional_context_parallel_ctx):
+            pred = model(input_ids)
+            loss = train_spec.loss_fn(pred, labels)
+            # pred.shape=(bs, seq_len, vocab_size)
+            # need to free to before bwd to avoid peaking memory
+            del pred
+            loss.backward()
+    return loss
+
+
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -188,6 +246,9 @@ def main(job_config: JobConfig):
         model.train()
 
         model_parts = [model]
+        pp_schedule = None
+        has_first_stage = None
+        has_last_stage = None
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
@@ -287,45 +348,20 @@ def main(job_config: JobConfig):
 
             optimizers.zero_grad()
 
-            # apply context parallelism if cp is enabled
-            # ensure CP handles the separate freqs_cis buffer for each pp stage
-            optional_context_parallel_ctx = (
-                dist_utils.create_context_parallel_ctx(
-                    cp_mesh=world_mesh["cp"],
-                    cp_buffers=[input_ids, labels] + [m.freqs_cis for m in model_parts],
-                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                    cp_no_restore_buffers={input_ids, labels},
-                    cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
-                )
-                if parallel_dims.cp_enabled
-                else None
+            loss = _batch_backward(
+                model_parts,
+                input_ids,
+                labels,
+                train_spec,
+                train_context,
+                parallel_dims,
+                world_mesh,
+                pp_schedule,
+                has_first_stage,
+                has_last_stage,
+                device,
+                job_config,
             )
-
-            if parallel_dims.pp_enabled:
-                # Pipeline Parallel forward / backward inside step() call
-                with train_context(optional_context_parallel_ctx):
-                    targets, losses = (labels, []) if has_last_stage else (None, None)
-                    if has_first_stage:
-                        pp_schedule.step(input_ids, target=targets, losses=losses)
-                    else:
-                        pp_schedule.step(target=targets, losses=losses)
-
-                # accumulate losses across pipeline microbatches
-                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss = (
-                    torch.mean(torch.stack(losses)).to(device)
-                    if has_last_stage
-                    else torch.tensor([-1.0], device=device)
-                )
-            else:
-                # Non-PP forward / backward
-                with train_context(optional_context_parallel_ctx):
-                    pred = model(input_ids)
-                    loss = train_spec.loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
 
             # clip gradients
             dist_utils.clip_grad_norm_(
