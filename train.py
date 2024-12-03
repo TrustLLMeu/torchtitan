@@ -27,6 +27,20 @@ from torchtitan.tools.profiling import (
 )
 
 
+def _get_batch(data_iterator, device_type):
+    # get batch
+    data_load_start = time.perf_counter()
+    batch = next(data_iterator)
+    input_ids, labels = batch
+    batch_ntokens = labels.numel()
+    data_loading_time = time.perf_counter() - data_load_start
+
+    input_ids = input_ids.to(device_type)
+    labels = labels.to(device_type)
+
+    return input_ids, labels, data_loading_time, batch_ntokens
+
+
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -262,15 +276,15 @@ def main(job_config: JobConfig):
             train_state.step += 1
             gc_handler.run(train_state.step)
 
-            # get batch
-            data_load_start = time.perf_counter()
-            batch = next(data_iterator)
-            input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(time.perf_counter() - data_load_start)
+            (
+                input_ids,
+                labels,
+                data_loading_time,
+                batch_ntokens,
+            ) = _get_batch(data_iterator, device_type)
+            ntokens_since_last_log += batch_ntokens
+            data_loading_times.append(data_loading_time)
 
-            input_ids = input_ids.to(device_type)
-            labels = labels.to(device_type)
             optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
