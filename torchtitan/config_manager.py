@@ -332,6 +332,14 @@ class JobConfig:
             "--training.batch_size", type=int, default=8, help="Batch size"
         )
         self.parser.add_argument(
+            "--training.global_batch_size",
+            type=int,
+            help=(
+                "Global batch size "
+                "(defaults to `training.batch_size * data-parallel degree`)"
+            )
+        )
+        self.parser.add_argument(
             "--training.seq_len", type=int, default=2048, help="Sequence length"
         )
         self.parser.add_argument(

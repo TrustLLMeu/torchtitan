@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import importlib
 import os
 import time
@@ -124,6 +125,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
+        # verify batch sizes
+        if job_config.training.global_batch_size is None:
+            job_config.training.global_batch_size = \
+                job_config.training.batch_size * dp_degree
+        assert job_config.training.global_batch_size > 0
+        assert (
+            job_config.training.global_batch_size
+            % (job_config.training.batch_size * dp_degree)
+            == 0
+        ), (
+            f"global batch size must be multiple of local batch size times "
+            f"data-parallel degree ({job_config.training.global_batch_size} "
+            f"% ({job_config.training.batch_size} * {dp_degree}) != 0)"
+        )
+
+        self.gradient_accumulation_steps = (
+            job_config.training.global_batch_size
+            // (job_config.training.batch_size * dp_degree)
+        )
+        assert self.gradient_accumulation_steps > 0
+
         # build dataloader
         tokenizer = (
             self.train_spec.build_tokenizer_fn(job_config)
@@ -191,6 +213,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = None
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
+
+        unwrapped_loss_fn = self.loss_fn
+
+        @functools.wraps(unwrapped_loss_fn)
+        def accumulated_loss_fn(*args, **kwargs):
+            loss = unwrapped_loss_fn(*args, **kwargs)
+            return loss / self.gradient_accumulation_steps
+
+        self.loss_fn = accumulated_loss_fn
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -291,7 +322,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             "Trainer is initialized with "
             f"local batch size {job_config.training.batch_size}, "
-            f"global batch size {job_config.training.batch_size * dp_degree}, "
+            f"global batch size {job_config.training.global_batch_size}, "
+            f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
@@ -363,7 +395,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 loss.backward()
         return loss
 
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+    def train_step(self, data_iterator: Iterable):
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -372,7 +404,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
-        loss = self.batch_backward(input_dict, labels)
+        for microbatch in range(self.gradient_accumulation_steps):
+            input_dict, labels = self.next_batch(data_iterator)
+            loss = self.batch_backward(input_dict, labels)
+            self.metrics_processor.accumulated_losses.append(loss.detach())
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
@@ -383,6 +418,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+
+        # Reduce the data collected over gradient accumulation steps.
+        loss = torch.sum(torch.stack(self.metrics_processor.accumulated_losses))
+        self.metrics_processor.accumulated_losses.clear()
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):
@@ -419,8 +458,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             while self.step < job_config.training.steps:
                 self.step += 1
                 self.gc_handler.run(self.step)
-                inputs, labels = self.next_batch(data_iterator)
-                self.train_step(inputs, labels)
+                self.train_step(data_iterator)
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
                 )
