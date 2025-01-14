@@ -16,6 +16,7 @@ from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.eval import EvaluationManager
 
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
@@ -214,6 +215,36 @@ def main(job_config: JobConfig):
         job_config=job_config,
     )
 
+    eval_dataloader = []
+    eval_seq_len = (
+        job_config.evaluation.seq_len
+        if (
+                job_config.evaluation.enable_evaluation
+                and job_config.evaluation.seq_len is not None
+        ) else job_config.training.seq_len
+    )
+    eval_steps = job_config.evaluation.steps
+    if job_config.evaluation.enable_evaluation:
+        eval_batch_size = (
+            job_config.evaluation.batch_size
+            if job_config.evaluation.batch_size is not None
+            else job_config.training.batch_size * 2
+        )
+        job_config.evaluation.seq_len = eval_seq_len
+        job_config.evaluation.batch_size = eval_batch_size
+
+        eval_dataloader = train_spec.build_dataloader_fn(
+            dp_world_size=dp_degree,
+            dp_rank=dp_rank,
+            tokenizer=tokenizer,
+            job_config=job_config,
+        )
+        if eval_steps is None:
+            eval_steps = len(eval_dataloader)
+    evaluation = EvaluationManager(
+        job_config,
+    )
+
     # build model (using meta init)
     model_cls = train_spec.cls
     model_config = train_spec.config[job_config.model.flavor]
@@ -223,7 +254,7 @@ def main(job_config: JobConfig):
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
-    model_config.max_seq_len = job_config.training.seq_len
+    model_config.max_seq_len = max(job_config.training.seq_len, eval_seq_len)
 
     logger.info(
         f"Building {train_spec.name} {job_config.model.flavor} with {model_config}"
@@ -241,6 +272,11 @@ def main(job_config: JobConfig):
         utils.get_num_params(model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
+    )
+    eval_num_flop_per_token = utils.get_num_flop_per_token(
+        utils.get_num_params(model, exclude_embedding=True),
+        model_config,
+        eval_seq_len,
     )
     logger.info(
         f"{color.blue}Model {train_spec.name} {job_config.model.flavor} "
@@ -263,6 +299,7 @@ def main(job_config: JobConfig):
         # apply PT-D Pipeline Parallel
         (
             pp_schedule,
+            eval_pp_schedule,
             model_parts,
             has_first_stage,
             has_last_stage,
@@ -298,6 +335,7 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
         pp_schedule = None
+        eval_pp_schedule = None
         has_first_stage = None
         has_last_stage = None
 
@@ -357,11 +395,13 @@ def main(job_config: JobConfig):
             metric_logger.log(metrics, step=step)
 
     data_iterator = iter(dataloader)
+    eval_data_iterator = iter(eval_dataloader)
 
     train_context = dist_utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
+    eval_context = dist_utils.get_eval_context(parallel_dims.loss_parallel_enabled)
 
     # variables used to keep info for metrics logging
     accumulated_losses = []
@@ -510,6 +550,21 @@ def main(job_config: JobConfig):
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
+            evaluation.run(
+                train_state.step,
+                model,
+                eval_data_iterator,
+                train_spec.loss_fn,
+                eval_context,
+                parallel_dims,
+                world_mesh,
+                dp_mesh,
+                eval_pp_schedule,
+                eval_steps,
+                metric_logger,
+                logger,
+                force=(train_state.step == job_config.training.steps),
+            )
 
             # signal the profiler that the next profiling step has started
             if torch_profiler:
@@ -529,6 +584,7 @@ def main(job_config: JobConfig):
         logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
 
+    # TODO wait for async eval
     metric_logger.close()
     logger.info("Training completed")
 

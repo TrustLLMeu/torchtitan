@@ -513,6 +513,71 @@ class JobConfig:
             action="store_true",
             help="Use deterministic algorithms wherever possible, may be slower",
         )
+
+        # evaluation configs
+        self.parser.add_argument(
+            "--evaluation.enable_evaluation",
+            action="store_true",
+            help="Whether to enable evaluation",
+        )
+        self.parser.add_argument(
+            "--evaluation.dataset",
+            type=str,
+            default="c4_mini",
+            help="Dataset to use for evaluation",
+        )
+        self.parser.add_argument(
+            "--evaluation.dataset_path",
+            type=str,
+            help="""
+                Path to the evaluation dataset in the file system. If provided, data will be
+                loaded from this path instead of downloaded.""",
+        )
+        self.parser.add_argument(
+            "--evaluation.batch_size",
+            type=int,
+            help="Batch size during evaluation (default: training.batch_size * 2)",
+        )
+        self.parser.add_argument(
+            "--evaluation.seq_len",
+            type=int,
+            help="Sequence length during evaluation (default: training.seq_len)",
+        )
+        self.parser.add_argument(
+            "--evaluation.steps",
+            type=int,
+            help="How many evaluation steps to run (default: whole dataset)",
+        )
+        self.parser.add_argument(
+            "--evaluation.async_mode",
+            type=str,
+            default="disabled",
+            help="""
+                Which async evaluation mode to use. Currently there are 3 different modes.
+                1. "disabled": synchronized evaluation will be executed.
+                2. "async": a new asynchronous process will be used for evaluation.
+                3. "async_with_pinned_mem": this option utilizes a dedicated pinned memory
+                   space and creates a separate process for faster GPU->CPU transfer
+                   performance and eliminating GIL contention. The cost is increased CPU
+                   memory usage. If insufficient CPU memory is available, performance may
+                   degrade due to memory paging. For most users, "async" should suffice as
+                   the performance overhead is typically small (on the order of tens of
+                   seconds) compared to evaluation frequency. This mode can be employed
+                   to pursue near-zero evaluation times (e.g., < 1 second) given
+                   appropriate hardware support such as ample CPU memory and fast PCIe.
+
+                "disabled" is the default mode.
+            """,
+        )
+        self.parser.add_argument(
+            "--evaluation.cpu_only",
+            action="store_true",
+            help="""
+                Whether to move the model to CPU for evaluation. May be useful for
+                asynchronous evaluation modes.
+            """,
+        )
+
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",

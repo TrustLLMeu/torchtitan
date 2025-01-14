@@ -9,6 +9,7 @@ from typing import Callable
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
+    _ScheduleForwardOnly,
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
@@ -135,6 +136,11 @@ def build_pipeline_schedule(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} "
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
+    eval_schedule = _ScheduleForwardOnly(
+        stages if looped_schedule else stages[0],
+        n_microbatches=n_microbatches,
+        loss_fn=loss_fn,
+    )
 
     if pp_schedule_csv:
         assert schedule_class in [
@@ -146,8 +152,9 @@ def build_pipeline_schedule(
             "and _PipelineScheduleRuntime support csv schedules"
         )
         schedule._load_csv(pp_schedule_csv)
+        eval_schedule._load_csv(pp_schedule_csv)
 
-    return schedule
+    return schedule, eval_schedule
 
 
 # TODO(whc) should this be a utility inside torch.pipelining?

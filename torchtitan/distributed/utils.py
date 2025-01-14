@@ -164,6 +164,13 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
     return context
 
 
+def get_eval_context(enable_loss_parallel: bool):
+    return get_train_context(
+        enable_loss_parallel,
+        enable_compiled_autograd=False,
+    )
+
+
 def init_distributed(job_config):
     def _warn_overwrite_env(env, val):
         if env in os.environ:
