@@ -593,7 +593,7 @@ class CheckpointManager:
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             logger.debug(
-                f"Waiting for the background process to finish, {time.monotonic()=}.:.2f"
+                f"Waiting for the checkpoint background process to finish, {time.monotonic()=}.:.2f"
             )
             if not self.mp.is_alive():
                 raise RuntimeError("The checkpoint background process is dead.")
