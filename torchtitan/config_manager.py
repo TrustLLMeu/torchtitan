@@ -329,6 +329,23 @@ class JobConfig:
                 loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
+            "--training.dataset_inner_name", type=str, help="Dataset name to use"
+        )
+        self.parser.add_argument(
+            "--training.dataset_split", type=str, default="train", help="Dataset split to use"
+        )
+        self.parser.add_argument(
+            "--training.dataset_streaming",
+            action="store_true",
+            help="Whether to stream the dataset",
+        )
+        self.parser.add_argument(
+            "--training.dataset_key",
+            type=str,
+            default="text",
+            help="Key to use for extracting the relevant text data from the dataset's samples",
+        )
+        self.parser.add_argument(
             "--training.batch_size", type=int, default=8, help="Batch size"
         )
         self.parser.add_argument(
