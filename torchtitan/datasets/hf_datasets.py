@@ -653,6 +653,10 @@ def build_hf_validation_dataloader(
         dataset=hf_ds,
         seq_len=seq_len,
         infinite=False,
+        dataset_inner_name=dataset_inner_name,
+        dataset_split=dataset_split,
+        dataset_streaming=dataset_streaming,
+        dataset_key=dataset_key,
     )
 
     return ParallelAwareDataloader(
