@@ -52,6 +52,25 @@ def _apply_ac_to_transformer_block(
             create_selective_checkpoint_contexts,
         )
 
+        from torchtitan.models.llama3.model.model import BitNetTransformerBlock
+
+        mm_funs = [torch.ops.aten.mm.default]
+
+        if isinstance(module, BitNetTransformerBlock):
+            save_list = save_list.union(
+                {
+                    torch.ops.torchao.scaled_int8_mm.default,
+                    torch.ops.aten._int_mm.default,
+                    torch.ops.aten.mean.default,
+                }
+            )
+            mm_funs.extend(
+                [
+                    torch.ops.torchao.scaled_int8_mm.default,
+                    torch.ops.aten._int_mm.default,
+                ]
+            )
+
         mm_recompute_shapes = set()
         if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
             for module_fqn, submod in module.named_modules():
@@ -85,13 +104,13 @@ def _apply_ac_to_transformer_block(
                     return CheckpointPolicy.MUST_SAVE
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
-                if func == torch.ops.aten.mm.default:
+                if func in mm_funs:
                     if args[1].shape in mm_recompute_shapes:
                         return CheckpointPolicy.PREFER_RECOMPUTE
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
                 to_save = func in save_list and not (
-                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                    func in mm_funs and meta[mm_count_key] % 2 == 0
                 )
                 return (
                     CheckpointPolicy.MUST_SAVE
