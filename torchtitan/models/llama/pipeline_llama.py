@@ -47,7 +47,9 @@ def pipeline_llama(
         model, pp_mesh, parallel_dims, job_config, device, model_config
     )
 
-    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+    pp_schedule, eval_pp_schedule = build_pipeline_schedule(
+        job_config, stages, loss_fn
+    )
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -58,7 +60,7 @@ def pipeline_llama(
         if stage.is_last:
             has_last_stage = True
 
-    return pp_schedule, models, has_first_stage, has_last_stage
+    return pp_schedule, eval_pp_schedule, models, has_first_stage, has_last_stage
 
 
 def pipeline_llama_manual_split(

@@ -148,12 +148,14 @@ def build_hf_dataloader(
     tokenizer: Tokenizer,
     job_config: JobConfig,
     infinite: bool = True,
+    job_config_key: str = "training",
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.batch_size
-    seq_len = job_config.training.seq_len
+    inner_job_config = getattr(job_config, job_config_key)
+    dataset_name = inner_job_config.dataset
+    dataset_path = inner_job_config.dataset_path
+    batch_size = inner_job_config.batch_size
+    seq_len = inner_job_config.seq_len
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,
