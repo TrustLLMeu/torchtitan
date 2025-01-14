@@ -29,6 +29,7 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.llama3.model import BitNetTransformerBlock, TransformerBlock
 from torchtitan.tools.logging import logger
 
 
@@ -52,6 +53,8 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
+        if "bitnet" in job_config.model.converters:
+            raise RuntimeError("BitNet currently does not support tensor parallelism")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -189,25 +192,53 @@ def apply_tp(
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for layer_id, transformer_block in model.layers.items():
-        layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
-            ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
-            "feed_forward": prepare_module_input(
-                input_layouts=(Shard(1),),
-                desired_input_layouts=(Replicate(),),
-            ),
-            "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            "feed_forward.w3": colwise_parallel(),
-        }
+        if isinstance(transformer_block, TransformerBlock):
+            layer_plan = {
+                "attention_norm": SequenceParallel(),
+                "attention": prepare_module_input(
+                    input_layouts=(Shard(1), None),
+                    desired_input_layouts=(Replicate(), None),
+                ),
+                "attention.wq": colwise_parallel(),
+                "attention.wk": colwise_parallel(),
+                "attention.wv": colwise_parallel(),
+                "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+                "ffn_norm": SequenceParallel(),
+                "feed_forward": prepare_module_input(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+                "feed_forward.w1": colwise_parallel(),
+                "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                "feed_forward.w3": colwise_parallel(),
+            }
+        elif isinstance(transformer_block, BitNetTransformerBlock):
+            layer_plan = {
+                "attention": prepare_module_input(
+                    input_layouts=(Shard(1), None),
+                    desired_input_layouts=(Replicate(), None),
+                ),
+                "attention.wq": colwise_parallel(),
+                "attention.wk": colwise_parallel(),
+                "attention.wv": colwise_parallel(),
+                "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+                "attention.wq_norm": SequenceParallel(),
+                "attention.wk_norm": SequenceParallel(),
+                "attention.wv_norm": SequenceParallel(),
+                "attention.wo_norm": SequenceParallel(),
+                "feed_forward": prepare_module_input(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+                "feed_forward.w1": colwise_parallel(),
+                "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                "feed_forward.w3": colwise_parallel(),
+                "feed_forward.w1_norm": SequenceParallel(),
+                "feed_forward.w2_norm": SequenceParallel(),
+                "feed_forward.w3_norm": SequenceParallel(),
+            }
+        else:
+            raise TypeError("unknown transformer block type")
 
         parallelize_module(
             module=transformer_block,
@@ -258,20 +289,32 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
             f"Valid options: 'op' or a positive int representing layer frequency"
         )
     if use_op_sac:
+        mm_funs = [torch.ops.aten.mm.default]
+
         from torch.utils.checkpoint import (
             CheckpointPolicy,
             create_selective_checkpoint_contexts,
         )
+        if isinstance(module, BitNetTransformerBlock):
+            _save_list.update({
+                torch.ops.torchao.scaled_int8_mm.default,
+                torch.ops.aten._int_mm.default,
+                torch.ops.aten.mean.default,
+            })
+            mm_funs.extend([
+                torch.ops.torchao.scaled_int8_mm.default,
+                torch.ops.aten._int_mm.default,
+            ])
 
         def _get_custom_policy(meta):
             def _custom_policy(ctx, func, *args, **kwargs):
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
-                if func == torch.ops.aten.mm.default:
+                if func in mm_funs:
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
                 to_save = func in _save_list and not (
-                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                    func in mm_funs and meta[mm_count_key] % 2 == 0
                 )
                 return (
                     CheckpointPolicy.MUST_SAVE
