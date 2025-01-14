@@ -9,7 +9,7 @@
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.datasets.tokenizer import SentencePieceTokenizer, TikTokenizer
 from torchtitan.models.llama.model import Transformer, TransformerModelArgs
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
@@ -58,6 +58,15 @@ llama3_configs = {
     ),
 }
 
+llama2_configs = {
+    "debugmodel": llama3_configs["debugmodel"],
+    "7B": TransformerModelArgs(
+        dim=4096,
+        n_layers=32,
+        n_heads=32,
+    ),
+}
+
 
 register_train_spec(
     TrainSpec(
@@ -70,6 +79,21 @@ register_train_spec(
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
         tokenizer_cls=TikTokenizer,
+        loss_fn=cross_entropy_loss,
+    )
+)
+
+register_train_spec(
+    TrainSpec(
+        name="llama2",
+        cls=Transformer,
+        config=llama2_configs,
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_hf_dataloader,
+        tokenizer_cls=SentencePieceTokenizer,
         loss_fn=cross_entropy_loss,
     )
 )
