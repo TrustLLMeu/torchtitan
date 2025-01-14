@@ -553,7 +553,7 @@ def build_hf_dataloader(
             len(d) == normed_list_length
         ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
     hf_datasets = []
-    for (d_name, d_path, d_inner_name, d_split, d_key) in zip(
+    for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
         dataset_path,
         dataset_inner_name,
@@ -653,6 +653,10 @@ def build_hf_validation_dataloader(
         dataset=hf_ds,
         seq_len=seq_len,
         infinite=False,
+        dataset_inner_name=dataset_inner_name,
+        dataset_split=dataset_split,
+        dataset_streaming=dataset_streaming,
+        dataset_key=dataset_key,
     )
 
     return ParallelAwareDataloader(
