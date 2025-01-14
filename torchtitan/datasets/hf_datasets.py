@@ -22,12 +22,41 @@ from torchtitan.tools.logging import logger
 
 def _load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
-    return load_dataset(dataset_path, name="en", split="train", streaming=True)
+    return _load_simple_dataset(
+        dataset_path,
+        dataset_name="en",
+        dataset_split="train",
+        dataset_streaming=True,
+    )
 
 
 def _process_c4_text(sample: dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
-    return sample["text"]
+    return _process_simple_text(sample, "text")
+
+
+def _load_simple_dataset(
+        dataset_path: str,
+        dataset_name: Optional[str],
+        dataset_split: str,
+        dataset_streaming: bool,
+):
+    """Load a simple custom dataset with its configuration."""
+    return load_dataset(dataset_path, name=dataset_name, split=dataset_split, streaming=dataset_streaming)
+
+
+def _process_simple_text(sample: dict[str, Any], key: str) -> str:
+    """Process a simple custom dataset's sample text."""
+    return sample[key]
+
+
+@dataclass
+class DatasetArgs:
+    path: str
+    name: Optional[str]
+    split: str
+    streaming: bool
+    key: str
 
 
 @dataclass
@@ -39,21 +68,31 @@ class DatasetConfig:
 
 # Add your dataset here here - more information at docs/datasets.md
 DATASETS = {
-    "c4": DatasetConfig(
+    "c4": DatasetArgs(
         path="allenai/c4",
-        loader=_load_c4_dataset,
-        text_processor=_process_c4_text,
+        name="en",
+        split="train",
+        streaming=True,
+        key="text",
     ),
-    "c4_test": DatasetConfig(
+    "c4_test": DatasetArgs(
         path="tests/assets/c4_test",
-        loader=lambda path: load_dataset(path, split="train"),
-        text_processor=_process_c4_text,
+        name=None,
+        split="train",
+        streaming=False,
+        key="text",
     ),
+    "simple_custom": None,
 }
 
 
 def _validate_dataset(
-    dataset_name: str, dataset_path: str = None
+    dataset_name: str,
+    dataset_path: str,
+    dataset_inner_name: Optional[str],
+    dataset_split: str,
+    dataset_streaming: bool,
+    dataset_key: str,
 ) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
     if dataset_name not in DATASETS:
@@ -63,6 +102,27 @@ def _validate_dataset(
         )
 
     config = DATASETS[dataset_name]
+    if config is None:
+        config = DatasetArgs(
+            path=dataset_path,
+            name=dataset_inner_name,
+            split=dataset_split,
+            streaming=dataset_streaming,
+            key=dataset_key,
+        )
+    if not isinstance(config, DatasetConfig):
+        assert isinstance(config, DatasetArgs)
+        config = DatasetConfig(
+            path=config.path,
+            loader=lambda path: _load_simple_dataset(
+                path,
+                config.name,
+                config.split,
+                config.streaming,
+            ),
+            text_processor=lambda sample: _process_simple_text(sample, config.key),
+        )
+
     path = dataset_path or config.path
     logger.info(f"Preparing {dataset_name} dataset from {path}")
     return path, config.loader, config.text_processor
@@ -78,12 +138,21 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        dataset_inner_name: Optional[str] = None,
+        dataset_split: str = "train",
+        dataset_streaming: bool = False,
+        dataset_key: str = "text",
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
         path, dataset_loader, text_processor = _validate_dataset(
-            dataset_name, dataset_path
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            dataset_inner_name=dataset_inner_name,
+            dataset_split=dataset_split,
+            dataset_streaming=dataset_streaming,
+            dataset_key=dataset_key,
         )
         ds = dataset_loader(path)
 
@@ -156,6 +225,10 @@ def build_hf_dataloader(
     dataset_path = inner_job_config.dataset_path
     batch_size = inner_job_config.batch_size
     seq_len = inner_job_config.seq_len
+    dataset_inner_name = inner_job_config.dataset_inner_name
+    dataset_split = inner_job_config.dataset_split
+    dataset_streaming = inner_job_config.dataset_streaming
+    dataset_key = inner_job_config.dataset_key
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,
@@ -165,6 +238,10 @@ def build_hf_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
+        dataset_inner_name=dataset_inner_name,
+        dataset_split=dataset_split,
+        dataset_streaming=dataset_streaming,
+        dataset_key=dataset_key,
     )
 
     return ParallelAwareDataloader(
