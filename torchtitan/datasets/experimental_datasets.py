@@ -18,26 +18,26 @@ from torchtitan.components.tokenizer import Tokenizer
 """
 The following distributed dataloaders are designed around 3 main principles:
 
-1. Efficient, asynchronous operation. Workers on different devices do not communicate. 
-2. Modularity. Data loading pipeline is composed of wrapped iterators, the base iterator 
-    loading from disk and additional layers adding levels of post-processing (shuffling, 
+1. Efficient, asynchronous operation. Workers on different devices do not communicate.
+2. Modularity. Data loading pipeline is composed of wrapped iterators, the base iterator
+    loading from disk and additional layers adding levels of post-processing (shuffling,
     packing, padding, etc.).
-3. Seamless resumption from checkpoint. Each stage of the pipeline maintains an internal 
-    state that can be written/read on disk via implemented recursive `state_dict()` and 
+3. Seamless resumption from checkpoint. Each stage of the pipeline maintains an internal
+    state that can be written/read on disk via implemented recursive `state_dict()` and
     `load_state_dict()` calls.
-4. Rescalability. Users can save and load checkpoints to/from different numbers of workers 
-    without losing the global state. This is accomplished by splitting state fields for each 
-    layer into `state_params`, which are typically scalar-valued and can be discarded when 
-    rescaling (i.e. counters, RNG states), and `reshard_params`, which are lists that can be 
+4. Rescalability. Users can save and load checkpoints to/from different numbers of workers
+    without losing the global state. This is accomplished by splitting state fields for each
+    layer into `state_params`, which are typically scalar-valued and can be discarded when
+    rescaling (i.e. counters, RNG states), and `reshard_params`, which are lists that can be
     re-distributed over workers (i.e. buffers).
 
-Our loaders obey the following type heirarchy: 
-torch.data.IterableDataset -> _StatefulDataset -> _WrapperDataset. 
-`_StatefulDataset` implements state and checkpointing logic. A `_WrapperDataset` holds a 
-single `_StatefulDataset` and iterates via calling its wrapped dataset any number of times, 
-then applying some sort of post-processing and yielding the result. Users build data processing 
-pipelines by wrapping a base `_StatefulDataset` in any number of `_WrapperDataset` layers, 
-which is then passed to the torch DataLoader. 
+Our loaders obey the following type heirarchy:
+torch.data.IterableDataset -> _StatefulDataset -> _WrapperDataset.
+`_StatefulDataset` implements state and checkpointing logic. A `_WrapperDataset` holds a
+single `_StatefulDataset` and iterates via calling its wrapped dataset any number of times,
+then applying some sort of post-processing and yielding the result. Users build data processing
+pipelines by wrapping a base `_StatefulDataset` in any number of `_WrapperDataset` layers,
+which is then passed to the torch DataLoader.
 """
 
 
@@ -1437,7 +1437,7 @@ def build_experimental_dataloader(
         filehandler = ParquetHandler(tokenizer, cfg.dataset.col_name)
     else:
         filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)
-    
+
     # Base reader layer
     data = StreamingDocDataset(
         inner_job_config.dataset_path,
