@@ -34,6 +34,7 @@ from torch.utils.data import DataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.datasets.experimental_datasets import StreamingDocDataset
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -294,6 +295,14 @@ class CheckpointManager:
                 LR_SCHEDULER: lr_schedulers,
             }
         )
+        state_update_dict = {
+            MODEL: ModelWrapper(model_parts),
+            OPTIMIZER: optimizers,
+        }
+        if not isinstance(dataloader.dataset, StreamingDocDataset):
+            state_update_dict[DATALOADER] = dataloader
+        state_update_dict[LR_SCHEDULER] = lr_schedulers
+        self.states.update(state_update_dict)
         self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False

@@ -15,6 +15,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.config_manager import JobConfig
+from torchtitan.datasets.experimental_datasets import build_experimental_dataloader
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.eval import EvaluationManager
 
@@ -208,6 +210,11 @@ def main(job_config: JobConfig):
     # dataloader must be changed.
     if ft_manager.enabled:
         dp_degree, dp_rank = ft_manager.get_dp_info(dp_degree, dp_rank)
+
+    if job_config.dataset.use_experimental_dataloader:
+        assert train_spec.build_dataloader_fn is build_hf_dataloader, \
+            "can only switch HF datasets to use experimental loader"
+        train_spec.build_dataloader_fn = build_experimental_dataloader
     dataloader = train_spec.build_dataloader_fn(
         dp_world_size=dp_degree,
         dp_rank=dp_rank,
