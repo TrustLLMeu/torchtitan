@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.datasets.experimental_datasets import build_experimental_dataloader
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 
-__all__ = ["build_hf_dataloader"]
+__all__ = ["build_experimental_dataloader", "build_hf_dataloader"]

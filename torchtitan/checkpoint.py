@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.datasets.experimental_datasets import StreamingDocDataset
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -183,14 +184,14 @@ class CheckpointManager:
         """
         self.states = states
 
-        self.states.update(
-            {
-                "model": ModelWrapper(model_parts),
-                "optimizer": optimizers,
-                "dataloader": dataloader,
-                "lr_scheduler": lr_schedulers,
-            }
-        )
+        state_update_dict = {
+            "model": ModelWrapper(model_parts),
+            "optimizer": optimizers,
+        }
+        if not isinstance(dataloader.dataset, StreamingDocDataset):
+            state_update_dict["dataloader"] = dataloader
+        state_update_dict["lr_scheduler"] = lr_schedulers
+        self.states.update(state_update_dict)
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (

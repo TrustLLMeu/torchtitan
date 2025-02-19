@@ -13,6 +13,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import build_experimental_dataloader, build_hf_dataloader
 from torchtitan.eval import EvaluationManager
 
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -178,6 +179,10 @@ def main(job_config: JobConfig):
 
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
+    if job_config.dataset.use_experimental_dataloader:
+        assert train_spec.build_dataloader_fn is build_hf_dataloader, \
+            "can only switch HF datasets to use experimental loader"
+        train_spec.build_dataloader_fn = build_experimental_dataloader
     dataloader = train_spec.build_dataloader_fn(
         dp_world_size=dp_degree,
         dp_rank=dp_rank,
