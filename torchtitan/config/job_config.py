@@ -795,6 +795,12 @@ class Quantize:
     """Quantized training config for grouped GEMMs"""
 
 
+# @dataclass
+# class BitNet:
+#     precompute_bitnet_scale_for_fsdp: bool = False
+#     """Whether to precompute BitNet scales dynamically for FSDP"""
+
+
 @dataclass
 class Comm:
     init_timeout_seconds: int = 300
