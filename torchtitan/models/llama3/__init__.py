@@ -7,7 +7,7 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.tokenizer import build_hf_byte_tokenizer, build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
@@ -68,9 +68,20 @@ llama3_args = {
     ),
 }
 
+llama2_configs = {
+    "debugmodel": llama3_configs["debugmodel"],
+    "7B": TransformerModelArgs(
+        dim=4096,
+        n_layers=32,
+        n_heads=32,
+        vocab_size=32000,
+    ),
+}
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
+
+register_train_spec(
+    TrainSpec(
+        name="llama3",
         model_cls=Transformer,
         model_args=llama3_args,
         parallelize_fn=parallelize_llama,
@@ -83,3 +94,23 @@ def get_train_spec() -> TrainSpec:
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
     )
+)
+
+register_train_spec(
+    TrainSpec(
+        name="llama2",
+        model_cls=Transformer,
+        model_args=llama2_configs,
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_hf_dataloader,
+        build_tokenizer_fn=build_hf_tokenizer,
+        build_loss_fn=build_cross_entropy_loss,
+        build_validator_fn=build_validator,
+        # TODO Not tested, but we expect that the
+        #      `Llama3StateDictAdapter` works for Llama-2 as well.
+        state_dict_adapter=Llama3StateDictAdapter,
+    )
+)
