@@ -752,6 +752,13 @@ class JobConfig:
             """,
         )
 
+        # BitNet configs
+        self.parser.add_argument(
+            "--bitnet.precompute_bitnet_scale_for_fsdp",
+            action="store_true",
+            help="Whether to precompute BitNet scales dynamically for FSDP",
+        )
+
         # communications library settings
         self.parser.add_argument(
             "--comm.init_timeout_seconds",
