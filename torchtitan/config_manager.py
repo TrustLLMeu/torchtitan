@@ -200,6 +200,12 @@ class JobConfig:
             help="Tokenizer path",
         )
         self.parser.add_argument(
+            "--model.vocab_size_multiple_of",
+            type=int,
+            default=128,
+            help="Whether to pad the vocabulary size so it becomes divisible by the given value.",
+        )
+        self.parser.add_argument(
             "--model.converters",
             type=string_list,
             nargs="+",
