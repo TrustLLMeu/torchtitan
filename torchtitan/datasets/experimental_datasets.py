@@ -1449,6 +1449,18 @@ _handler_map = {
 }
 
 
+def causal_lm(data_seq, prompt_len=0):
+    """
+    Perform causal language modeling by right-shifting the input sequence.
+    Sets first prompt_len tokens to be ignored by the loss.
+    """
+    data_seq = torch.LongTensor(data_seq)
+    t = data_seq.clone()[1:]
+    data_seq = data_seq[:-1]
+    t[:prompt_len] = -100
+    return data_seq, t
+
+
 def build_experimental_dataloader(
         dp_world_size: int,
         dp_rank: int,
@@ -1477,17 +1489,6 @@ def build_experimental_dataloader(
     datasets, weights = parse_data_args(
         cfg.dataset.datasets, cfg.dataset.dataset_weights
     )
-
-    def causal_lm(data_seq, prompt_len=0):
-        """
-        Perform causal language modeling by right-shifting the input sequence.
-        Sets first prompt_len tokens to be ignored by the loss.
-        """
-        data_seq = torch.LongTensor(data_seq)
-        t = data_seq.clone()[1:]
-        data_seq = data_seq[:-1]
-        t[:prompt_len] = -100
-        return data_seq, t
 
     # Base streaming dataset. Returns doc chunks in sequence.
     # Implements dataset sampling and rescalability.
