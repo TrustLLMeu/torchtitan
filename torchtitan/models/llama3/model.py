@@ -8,6 +8,7 @@
 
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 import torch
@@ -19,6 +20,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
+from torchtitan.tools.logging import logger
 
 
 @dataclass
@@ -46,6 +48,15 @@ class TransformerModelArgs(BaseModelArgs):
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
+        if job_config.model.vocab_size_multiple_of:
+            vocab_divisor = job_config.model.vocab_size_multiple_of
+            self.vocab_size = int(
+                math.ceil(self.vocab_size / vocab_divisor)
+                * vocab_divisor
+            )
+            logger.info(
+                f"Padded vocab size from {tokenizer.n_words} to {self.vocab_size}."
+            )
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
         self.attn_mask_type = job_config.model.attn_mask_type
