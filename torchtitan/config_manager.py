@@ -552,13 +552,11 @@ class JobConfig:
         self.parser.add_argument(
             "--dataset.bos_token",
             type=int,
-            default=-1,
-            help="BOS token index value. If not using, leave as -1.",
+            help="BOS token index value.",
         )
         self.parser.add_argument(
             "--dataset.eos_token",
             type=int,
-            default=0,
             help="EOS or SEP token index value.",
         )
         self.parser.add_argument(
