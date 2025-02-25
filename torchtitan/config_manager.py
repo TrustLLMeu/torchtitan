@@ -8,7 +8,7 @@ import argparse
 import os
 import sys
 from collections import defaultdict
-from typing import Tuple, Union
+from typing import Tuple
 
 import torch
 
@@ -326,7 +326,7 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.max_norm",
-            type=Union[float, int],
+            type=float,
             default=1.0,
             help="Max norm for gradient clipping",
         )
