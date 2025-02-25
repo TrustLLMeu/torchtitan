@@ -1074,7 +1074,7 @@ class StreamingDocDataset(_StatefulDataset):
         # Add bos/eos tokens if needed
         if self.bos is not None and j == 0:
             chunk = [self.bos] + chunk
-        if j == n_chunks - 1:
+        if self.eos is not None and j == n_chunks - 1:
             chunk = chunk + [self.eos]
         return chunk
 
@@ -1496,7 +1496,11 @@ def build_experimental_dataloader(
         for x in cfg.dataset.drop_tokens.split(",")
         if len(x.strip()) > 0
     ]
-    droplist = droplist + [cfg.dataset.bos_token, cfg.dataset.eos_token]
+    if cfg.dataset.bos_token is not None:
+        droplist = droplist + [cfg.dataset.bos_token]
+    if cfg.dataset.eos_token is not None:
+        droplist = droplist + [cfg.dataset.eos_token]
+
     assert (
         cfg.dataset.file_type in _handler_map
     ), f"File type {cfg.dataset.file_type} is not recognized ({list(_handler_map.keys())})"
@@ -1513,7 +1517,7 @@ def build_experimental_dataloader(
         dp_world_size,
         filehandler,
         cfg.dataset.eos_token,
-        bos_token=None if cfg.dataset.bos_token == -1 else cfg.dataset.bos_token,
+        bos_token=cfg.dataset.bos_token,
         strip_tokens=set(droplist),
         min_length=3,
         seed=42,
