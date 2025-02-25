@@ -15,7 +15,7 @@ from torchtitan.datasets.tokenizer.sentencepiece import build_sentencepiece_toke
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .model import Transformer, TransformerModelArgs
+from .model import BitNetTransformer, Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
 
@@ -106,6 +106,21 @@ register_train_spec(
         name="byte_llama2",
         cls=Transformer,
         config=llama2_configs,
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_hf_dataloader,
+        build_tokenizer_fn=build_byte_tokenizer,
+        loss_fn=cross_entropy_loss,
+    )
+)
+
+register_train_spec(
+    TrainSpec(
+        name="bit_byte_llama3",
+        cls=BitNetTransformer,
+        config=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
