@@ -398,6 +398,7 @@ class ParquetReader:
         self.col_name = col_name
         self.pq_file = pq.ParquetFile(path)
 
+        self._prev_row_group_index = None
         self.init_row_group_cache()
 
     def get_row_group_cache_path(self):
@@ -438,11 +439,13 @@ class ParquetReader:
         row_group_index = self.get_row_group_index(index)
         if row_group_index > 0:
             index = index - self.row_group_cache[row_group_index - 1]
-        row_group_col = self.pq_file.read_row_group(
-            row_group_index,
-            columns=[self.col_name],
-        )[self.col_name]
-        return row_group_col[index]
+        if row_group_index != self._prev_row_group_index:
+            self._row_group_col = self.pq_file.read_row_group(
+                row_group_index,
+                columns=[self.col_name],
+            )[self.col_name]
+            self._prev_row_group_index = row_group_index
+        return self._row_group_col[index]
 
     def close(self):
         self.pq_file.close()
