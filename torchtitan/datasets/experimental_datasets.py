@@ -476,7 +476,7 @@ class ParquetHandler(_ShardFileHandler):
         return num_rows
 
     def get(self, reader, index: int, drop_tokens: Set):
-        doc = self.tokenizer.encode(str(reader[index]))
+        doc = self.tokenizer.encode(str(reader[index]), bos=True, eos=True)
         if len(doc) > 0:
             if doc[0] in drop_tokens:
                 doc = doc[1:]
