@@ -1,4 +1,6 @@
+import bisect
 import csv
+import json
 import logging
 import math
 import os
@@ -372,6 +374,10 @@ class ArrowHandler(_ShardFileHandler):
 
     def length(self, path: str):
         return self.open(path).num_record_batches
+        # pa_file = self.open(path)
+        # num_batches = pa_file.num_record_batches
+        # pa_file.close()
+        # return num_batches
 
     def get(self, reader: pa.RecordBatchFileReader, index: int, drop_tokens: Set):
         doc = reader.get_batch(index)[self.col_name]
@@ -386,6 +392,62 @@ class ArrowHandler(_ShardFileHandler):
         return doc.slice(index, n_pull).to_pylist()
 
 
+class ParquetReader:
+    def __init__(self, path: str, col_name: str):
+        self.path = path
+        self.col_name = col_name
+        self.pq_file = pq.ParquetFile(path)
+
+        self.init_row_group_cache()
+
+    def get_row_group_cache_path(self):
+        return self.path + '_row_group_cache.json'
+
+    def init_row_group_cache(self):
+        cache_path = self.get_row_group_cache_path()
+        if os.path.isfile(cache_path):
+            self.load_row_group_cache()
+        else:
+            self.create_row_group_cache()
+
+    def create_row_group_cache(self):
+        next_group_first_row = 0
+        self.row_group_cache = []
+        for row_group_index in range(self.pq_file.num_row_groups):
+            row_group = self.pq_file.read_row_group(row_group_index, columns=[self.col_name])
+            next_group_first_row = next_group_first_row + row_group.num_rows
+            self.row_group_cache.append(next_group_first_row)
+
+    def load_row_group_cache(self):
+        cache_path = self.get_row_group_cache_path()
+        with open(cache_path, 'r') as f:
+            self.row_group_cache = json.load(f)
+
+    def dump_row_group_cache(self):
+        cache_path = self.get_row_group_cache_path()
+        with open(cache_path, 'w') as f:
+            json.dump(self.row_group_cache, f, separators=(',', ':'))
+
+    def get_row_group_index(self, index: int):
+        return bisect.bisect_right(self.row_group_cache, index)
+
+    def __len__(self):
+        return self.pq_file.metadata.num_rows
+
+    def __getitem__(self, index: int):
+        row_group_index = self.get_row_group_index(index)
+        if row_group_index > 0:
+            index = index - self.row_group_cache[row_group_index - 1]
+        row_group_col = self.pq_file.read_row_group(
+            row_group_index,
+            columns=[self.col_name],
+        )[self.col_name]
+        return row_group_col[index]
+
+    def close(self):
+        self.pq_file.close()
+
+
 class ParquetHandler(_ShardFileHandler):
     """
     Reader for indexable parquet shard files, common in HF datasets.
@@ -397,15 +459,21 @@ class ParquetHandler(_ShardFileHandler):
     def __init__(self, tokenizer: Tokenizer, col_name: str = "text"):
         self.tokenizer = tokenizer
         self.col_name = col_name
+        self.row_group_cache = {}
 
     def is_legal(self, filepath: str):
         return "parquet" in os.path.splitext(filepath)[1]
 
     def open(self, path: str):
-        return pq.read_pandas(path, columns=[self.col_name])[self.col_name]
+        # return pq.read_pandas(path, columns=[self.col_name])[self.col_name]
+        return ParquetReader(path, self.col_name)
 
     def length(self, path: str):
-        return pq.read_pandas(path, columns=[]).num_rows
+        # return pq.read_pandas(path, columns=[]).num_rows
+        pq_file = pq.ParquetFile(path)
+        num_rows = pq_file.metadata.num_rows
+        pq_file.close()
+        return num_rows
 
     def get(self, reader, index: int, drop_tokens: Set):
         doc = self.tokenizer.encode(str(reader[index]))
@@ -1508,3 +1576,69 @@ def parse_data_args(datas, weights):
     datas = splitstrip(datas)
     weights = [float(x) for x in splitstrip(weights)]
     return datas, weights
+
+
+def _dump_cache(data_file_path):
+    reader = ParquetReader(data_file_path, col_name)
+    cache_path = reader.get_row_group_cache_path()
+    if not skip_existing or not os.path.isfile(cache_path):
+        reader.create_row_group_cache()
+        reader.dump_row_group_cache()
+        print(f"cached at {cache_path}")
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    import multiprocessing
+
+    parser = ArgumentParser()
+
+    parser.add_argument("--root_datapath", required=True)
+    parser.add_argument("--datasets")
+    parser.add_argument("--col_name", default="text")
+    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--skip_existing", action="store_true")
+
+    args = parser.parse_args()
+
+    root_datapath = args.root_datapath
+    datasets = args.datasets
+    col_name = args.col_name
+    num_workers = args.num_workers
+    skip_existing = args.skip_existing
+
+    datasets, _ = parse_data_args(datasets, [])
+
+    datasets = (
+        datasets
+        if datasets is not None
+        else [
+            f
+            for f in os.listdir(root_datapath)
+            if not os.path.isfile(os.path.join(root_datapath, f)) and "meta" not in f
+        ]
+    )
+    assert len(datasets) > 0, "You must specify at least one dataset"
+
+    print("now pre-caching...")
+    with multiprocessing.Pool(num_workers) as pool:
+        for dataset_name in datasets:
+            datapath = os.path.join(root_datapath, dataset_name)
+
+            shards = [
+                os.path.join(root, name)[len(datapath) + 1:]
+                for root, dirs, files in os.walk(datapath, topdown=False)
+                for name in files
+                if ParquetHandler.is_legal(None, os.path.join(root, name))
+            ]
+            shards.sort()  # Ensure consistent sharding across machines
+
+            def get_shard_paths():
+                for data_file_name in shards:
+                    data_file_path = os.path.join(datapath, data_file_name)
+                    yield data_file_path
+
+            for _ in pool.imap(_dump_cache, get_shard_paths()):
+                pass
+
+    print("done with pre-caching")
