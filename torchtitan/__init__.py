@@ -6,6 +6,8 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+# Import to register BitNetConverter.
+import torchtitan.components.bitnet  # noqa: F401
 # Import to register Float8Converter.
 import torchtitan.components.float8  # noqa: F401
 
