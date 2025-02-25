@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 import functools
 import importlib
 import os
@@ -177,6 +178,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # 3. max_seq_len base on inputs
         model_config.norm_type = job_config.model.norm_type
         model_config.vocab_size = tokenizer.n_words
+        if job_config.model.vocab_size_multiple_of:
+            vocab_divisor = job_config.model.vocab_size_multiple_of
+            model_config.vocab_size = int(
+                math.ceil(model_config.vocab_size / vocab_divisor)
+                * vocab_divisor
+            )
+            logger.info(
+                f"Padded vocab size from {tokenizer.n_words} to {model_config.vocab_size}."
+            )
         model_config.max_seq_len = job_config.training.seq_len
 
         logger.info(
