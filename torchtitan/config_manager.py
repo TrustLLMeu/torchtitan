@@ -332,6 +332,12 @@ class JobConfig:
             "--training.dataset_inner_name", type=str, help="Dataset name to use"
         )
         self.parser.add_argument(
+            "--training.dataset_files",
+            nargs="*",
+            type=str,
+            help="Dataset files to use (only necessary for certain types of datasets)",
+        )
+        self.parser.add_argument(
             "--training.dataset_split", type=str, default="train", help="Dataset split to use"
         )
         self.parser.add_argument(
