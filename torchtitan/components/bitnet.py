@@ -194,4 +194,15 @@ class BitNetConverter(ModelConverter):
             precompute_bitnet_scale_for_fsdp(m)
 
 
+try:
+    from torchao.prototype.quantized_training import BitNetTrainingLinearWeight
+except ImportError:
+    BitNetTrainingLinearWeight = None
+
+if BitNetTrainingLinearWeight is not None:
+    from torch.serialization import add_safe_globals
+
+    # Allow serialization.
+    add_safe_globals([BitNetTrainingLinearWeight])
+
 register_model_converter(BitNetConverter, "bitnet")
