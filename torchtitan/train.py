@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import os
 import time
 from datetime import timedelta
@@ -141,6 +142,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             // (job_config.training.batch_size * dp_degree)
         )
         assert self.gradient_accumulation_steps > 0
+
+        unwrapped_loss_fn = self.train_spec.loss_fn
+
+        @functools.wraps(unwrapped_loss_fn)
+        def accumulated_loss_fn(*args, **kwargs):
+            loss = unwrapped_loss_fn(*args, **kwargs)
+            return loss / self.gradient_accumulation_steps
+
+        self.train_spec.loss_fn = accumulated_loss_fn
 
         # build dataloader
         tokenizer = self.train_spec.tokenizer_cls(job_config.model.tokenizer_path)
@@ -417,7 +427,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        loss = torch.mean(torch.stack(self.metrics_processor.accumulated_losses))
+        loss = torch.sum(torch.stack(self.metrics_processor.accumulated_losses))
         self.metrics_processor.accumulated_losses.clear()
 
         # log metrics
