@@ -654,6 +654,7 @@ def build_hf_validation_dataloader(
         seq_len=seq_len,
         infinite=False,
         dataset_inner_name=dataset_inner_name,
+        dataset_files=dataset_files,
         dataset_split=dataset_split,
         dataset_streaming=dataset_streaming,
         dataset_key=dataset_key,
