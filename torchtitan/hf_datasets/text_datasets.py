@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from typing import Any, Callable
@@ -27,6 +28,7 @@ def _load_c4_dataset(dataset_path: str, split: str):
     return _load_simple_dataset(
         dataset_path,
         dataset_name="en",
+        dataset_files=None,
         dataset_split=split,
         dataset_streaming=True,
     )
@@ -40,6 +42,7 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
 def _load_simple_dataset(
     dataset_path: str,
     dataset_name: str | None,
+    dataset_files: str | Sequence[str] | None,
     dataset_split: str,
     dataset_streaming: bool,
 ):
@@ -47,6 +50,7 @@ def _load_simple_dataset(
     return load_dataset(
         dataset_path,
         name=dataset_name,
+        data_files=dataset_files,
         split=dataset_split,
         streaming=dataset_streaming,
     )
@@ -61,6 +65,7 @@ def _process_simple_text(sample: dict[str, Any], key: str) -> str:
 class DatasetArgs:
     path: str
     name: str | None
+    files: str | Sequence[str] | None
     split: str
     streaming: bool
     key: str
@@ -78,6 +83,7 @@ DATASETS = {
     "c4": DatasetArgs(
         path="allenai/c4",
         name="en",
+        files=None,
         split="train",
         streaming=True,
         key="text",
@@ -85,13 +91,15 @@ DATASETS = {
     "c4_test": DatasetArgs(
         path="tests/assets/c4_test",
         name=None,
+        files=None,
         split="train",
         streaming=False,
         key="text",
     ),
-    "c4_validation": DatasetConfig(
+    "c4_validation": DatasetArgs(
         path="allenai/c4",
         name="en",
+        files=None,
         split="validation",
         streaming=True,
         key="text",
@@ -104,6 +112,7 @@ def _validate_dataset(
     dataset_name: str,
     dataset_path: str | None,
     dataset_inner_name: str | None,
+    dataset_files: str | Sequence[str] | None,
     dataset_split: str,
     dataset_streaming: bool,
     dataset_key: str,
@@ -121,6 +130,7 @@ def _validate_dataset(
         config = DatasetArgs(
             path=dataset_path,
             name=dataset_inner_name,
+            files=dataset_files,
             split=dataset_split,
             streaming=dataset_streaming,
             key=dataset_key,
@@ -133,6 +143,7 @@ def _validate_dataset(
             loader=lambda path: _load_simple_dataset(
                 path,
                 old_config.name,
+                old_config.files,
                 old_config.split,
                 old_config.streaming,
             ),
@@ -155,6 +166,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         dp_world_size: int = 1,
         infinite: bool = False,
         dataset_inner_name: str | None = None,
+        dataset_files: str | Sequence[str] | None = None,
         dataset_split: str = "train",
         dataset_streaming: bool = False,
         dataset_key: str = "text",
@@ -166,6 +178,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
             dataset_name=dataset_name,
             dataset_path=dataset_path,
             dataset_inner_name=dataset_inner_name,
+            dataset_files=dataset_files,
             dataset_split=dataset_split,
             dataset_streaming=dataset_streaming,
             dataset_key=dataset_key,
@@ -264,6 +277,7 @@ def build_text_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
     dataset_inner_name = job_config.training.dataset_inner_name
+    dataset_files = job_config.training.dataset_files
     dataset_split = job_config.training.dataset_split
     dataset_streaming = job_config.training.dataset_streaming
     dataset_key = job_config.training.dataset_key
@@ -277,6 +291,7 @@ def build_text_dataloader(
         dp_world_size=dp_world_size,
         infinite=infinite,
         dataset_inner_name=dataset_inner_name,
+        dataset_files=dataset_files,
         dataset_split=dataset_split,
         dataset_streaming=dataset_streaming,
         dataset_key=dataset_key,
@@ -303,6 +318,7 @@ def build_text_validation_dataloader(
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len
     dataset_inner_name = job_config.validation.dataset_inner_name
+    dataset_files = job_config.validation.dataset_files
     dataset_split = job_config.validation.dataset_split
     dataset_streaming = job_config.validation.dataset_streaming
     dataset_key = job_config.validation.dataset_key
@@ -316,6 +332,7 @@ def build_text_validation_dataloader(
         dp_world_size=dp_world_size,
         infinite=infinite,
         dataset_inner_name=dataset_inner_name,
+        dataset_files=dataset_files,
         dataset_split=dataset_split,
         dataset_streaming=dataset_streaming,
         dataset_key=dataset_key,
