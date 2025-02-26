@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import os
 import time
 from datetime import timedelta
@@ -189,6 +190,15 @@ def main(job_config: JobConfig):
         // (job_config.training.batch_size * dp_degree)
     )
     assert gradient_accumulation_steps > 0
+
+    unwrapped_loss_fn = train_spec.loss_fn
+
+    @functools.wraps(unwrapped_loss_fn)
+    def accumulated_loss_fn(*args, **kwargs):
+        loss = unwrapped_loss_fn(*args, **kwargs)
+        return loss / gradient_accumulation_steps
+
+    train_spec.loss_fn = accumulated_loss_fn
 
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
@@ -420,7 +430,7 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
-            loss = torch.mean(torch.stack(accumulated_losses))
+            loss = torch.sum(torch.stack(accumulated_losses))
             accumulated_losses.clear()
 
             # log metrics
