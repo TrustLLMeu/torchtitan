@@ -112,15 +112,16 @@ def _validate_dataset(
         )
     if not isinstance(config, DatasetConfig):
         assert isinstance(config, DatasetArgs)
+        old_config = config
         config = DatasetConfig(
-            path=config.path,
+            path=old_config.path,
             loader=lambda path: _load_simple_dataset(
                 path,
-                config.name,
-                config.split,
-                config.streaming,
+                old_config.name,
+                old_config.split,
+                old_config.streaming,
             ),
-            text_processor=lambda sample: _process_simple_text(sample, config.key),
+            text_processor=lambda sample: _process_simple_text(sample, old_config.key),
         )
 
     path = dataset_path or config.path
