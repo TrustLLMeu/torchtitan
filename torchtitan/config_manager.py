@@ -321,7 +321,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.dataset_files",
             nargs='*',
-            type=str,
+            type=string_list,
             help="Dataset files to use (only necessary for certain types of datasets)",
         )
         self.parser.add_argument(
