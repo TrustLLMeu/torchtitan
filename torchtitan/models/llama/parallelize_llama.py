@@ -249,6 +249,9 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
             CheckpointPolicy,
             create_selective_checkpoint_contexts,
         )
+        if isinstance(module, BitNetTransformerBlock):
+            from torchao.prototype.quantized_training.bitnet import scaled_int8_mm
+            _save_list.update({scaled_int8_mm, torch.ops.aten.mean.default})
 
         def _get_custom_policy(meta):
             def _custom_policy(ctx, func, *args, **kwargs):
@@ -260,6 +263,13 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
                 to_save = func in _save_list and not (
                     func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
                 )
+                if isinstance(module, BitNetTransformerBlock):
+                    to_save = (
+                        to_save
+                        and not (
+                            func == scaled_int8_mm and meta[mm_count_key] % 2 == 0
+                        )
+                    )
                 return (
                     CheckpointPolicy.MUST_SAVE
                     if to_save
