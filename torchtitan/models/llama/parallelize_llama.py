@@ -57,6 +57,9 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
+        if "bitnet" in job_config.model.converters:
+            raise RuntimeError("BitNet currently does not support tensor parallelism")
+
         enable_float8_linear = "float8" in job_config.model.converters
         apply_tp(
             model,
