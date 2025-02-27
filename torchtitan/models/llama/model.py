@@ -571,7 +571,7 @@ class BitNetFeedForward(FeedForward):
         norm_eps: float,
     ):
         super().__init__(dim, hidden_dim, multiple_of, ffn_dim_multiplier)
-        self.w2_norm = build_norm(norm_type, dim=hidden_dim, eps=norm_eps)
+        self.w2_norm = build_norm(norm_type, dim=self.w2.weight.shape[1], eps=norm_eps)
 
     def forward(self, x):
         return self.w2(self.w2_norm(F.silu(self.w1(x)) * self.w3(x)))
