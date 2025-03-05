@@ -319,6 +319,12 @@ class JobConfig:
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
         )
         self.parser.add_argument(
+            "--training.constant_steps",
+            type=int,
+            default=0,
+            help="Steps for LR scheduler constant phase",
+        )
+        self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,

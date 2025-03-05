@@ -389,7 +389,8 @@ def build_lr_schedulers(
             lr_schedulers.
     """
     warmup_steps = int(job_config.training.warmup_steps)
-    decay_steps = float(max(1, job_config.training.steps - warmup_steps))
+    constant_steps = int(job_config.training.constant_steps)
+    decay_steps = float(max(1, job_config.training.steps - warmup_steps - constant_steps))
 
     def linear_warmup_linear_decay(
         warmup_steps: int, decay_steps: int, current_step: int
@@ -406,9 +407,11 @@ def build_lr_schedulers(
             current_step += 1
             curr_adjustment = float(current_step / (warmup_steps + 1))
 
+        elif current_step < constant_steps + warmup_steps:
+            curr_adjustment = 1.0
         else:
             # linear decay
-            normalized_step = decay_steps - (current_step - warmup_steps)
+            normalized_step = decay_steps - (current_step - warmup_steps - constant_steps)
             curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
 
         return curr_adjustment
