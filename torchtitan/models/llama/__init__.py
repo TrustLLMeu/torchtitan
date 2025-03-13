@@ -12,7 +12,8 @@ from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import ByteTokenizer, SentencePieceTokenizer, TikTokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .model import BitNetTransformer, Transformer, TransformerModelArgs
+from .bitnet_model import BitNetTransformer
+from .model import Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
 
