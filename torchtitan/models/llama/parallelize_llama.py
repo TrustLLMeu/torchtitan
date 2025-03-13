@@ -29,7 +29,7 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama.model import BitNetTransformerBlock
+from torchtitan.models.llama.bitnet_model import BitNetTransformerBlock
 from torchtitan.tools.logging import logger
 
 
