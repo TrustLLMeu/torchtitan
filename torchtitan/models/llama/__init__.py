@@ -15,7 +15,8 @@ from torchtitan.datasets.tokenizer.sentencepiece import build_sentencepiece_toke
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .model import BitNetTransformer, Transformer, TransformerModelArgs
+from .bitnet_model import BitNetTransformer
+from .model import Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
 
