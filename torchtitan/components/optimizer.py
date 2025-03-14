@@ -24,6 +24,8 @@ from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
+from optimizers import DistributedMuon, DistributedMuonV2, Muon
+
 __all__ = [
     "OptimizersContainer",
     "LRSchedulersContainer",
@@ -79,7 +81,18 @@ class OptimizersContainer(Optimizer, Generic[T]):
         self.model_parts = model_parts
         for model in self.model_parts:
             params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
+
+            # for muon, we need to pass model as well
+
+            is_muon = issubclass(optimizer_cls, (Muon, DistributedMuon, DistributedMuonV2))
+            extra_kwargs = optimizer_kwargs.pop("extra_kwargs")
+
+            if is_muon:
+                optimizer_kwargs.update(extra_kwargs)
+                self.optimizers.append(optimizer_cls(params, model, **optimizer_kwargs))
+            else:
+                self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
+
             all_params.extend(params)
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
@@ -248,6 +261,7 @@ def build_optimizers(
     model_parts: List[nn.Module],
     job_config: JobConfig,
     ft_manager: FTManager,
+    extra_kwargs: dict[str, Any],
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -291,9 +305,14 @@ def build_optimizers(
         "foreach": foreach,
     }
 
+    optimizer_kwargs["extra_kwargs"] = extra_kwargs
+
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
+        "Muon": Muon,
+        "DistributedMuon": DistributedMuon,
+        "DistributedMuonV2": DistributedMuonV2,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
