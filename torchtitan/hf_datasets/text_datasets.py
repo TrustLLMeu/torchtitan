@@ -104,6 +104,14 @@ DATASETS = {
         streaming=True,
         key="text",
     ),
+    "fineweb": DatasetArgs(
+        path="HuggingFaceFW/fineweb",
+        name="default",
+        files=None,
+        split="train",
+        streaming=True,
+        key="text",
+    ),
     "simple_custom": None,
 }
 
