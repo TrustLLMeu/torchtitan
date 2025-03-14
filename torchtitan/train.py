@@ -195,6 +195,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         with torch.device("meta"):
             model = model_cls.from_model_args(model_config)
 
+        logger.info(f"model: {model}")
+
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
         model_converters.convert(model)
@@ -371,6 +373,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
+        aux_loss = None
+
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         optional_context_parallel_ctx = (
@@ -407,13 +411,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
+                output = model_parts[0](inputs)
+                if isinstance(output, tuple):
+                    assert len(output) == 2
+                    pred, aux_loss = output
+                else:
+                    pred = output
                 loss = self.train_spec.loss_fn(pred, labels)
+                if aux_loss is not None:
+                    loss += aux_loss / self.gradient_accumulation_steps
+
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
-        return loss
+        return loss, aux_loss
 
     def train_step(self, data_iterator: Iterable):
         self.optimizers.zero_grad()
@@ -426,8 +438,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         for microbatch in range(self.gradient_accumulation_steps):
             inputs, labels = self.next_batch(data_iterator)
-            loss = self.batch_backward(inputs, labels)
+            loss, aux_loss = self.batch_backward(inputs, labels)
             self.metrics_processor.accumulated_losses.append(loss.detach())
+            if aux_loss is not None:
+                self.metrics_processor.accumulated_aux_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
@@ -442,6 +456,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(self.metrics_processor.accumulated_losses))
         self.metrics_processor.accumulated_losses.clear()
+        if len(self.metrics_processor.accumulated_aux_losses) > 0:
+            aux_loss = torch.sum(torch.stack(self.metrics_processor.accumulated_aux_losses))
+            self.metrics_processor.accumulated_aux_losses.clear()
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):
@@ -457,17 +474,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dist_utils.dist_mean(loss, world_mesh["dp_cp"]),
                 dist_utils.dist_max(loss, world_mesh["dp_cp"]),
             )
+            if aux_loss is not None:
+                aux_loss = dist_utils.dist_mean(aux_loss, world_mesh["dp_cp"])
         else:
             global_avg_loss = global_max_loss = loss.item()
 
         extra_log_data = {
             "optim/grad_norm": grad_norm,
         }
+        if aux_loss is not None:
+            extra_log_data["loss_metrics/aux_loss"] = aux_loss
 
         color = self.metrics_processor.color
         extra_print_data = (
             f"  {color.green}gradnorm: {grad_norm:7.4f}{color.reset}"
         )
+
         self.metrics_processor.log(
             self.step, global_avg_loss, global_max_loss, extra_log_data, extra_print_data,
         )
