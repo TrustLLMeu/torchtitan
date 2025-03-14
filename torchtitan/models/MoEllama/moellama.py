@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.layers import Attention, precompute_freqs_cis
+from torchtitan.models.llama.model import Attention, precompute_freqs_cis
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
