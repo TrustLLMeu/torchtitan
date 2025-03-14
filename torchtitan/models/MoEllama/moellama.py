@@ -1,0 +1,727 @@
+from dataclasses import dataclass
+from functools import partial
+import math
+from typing import Optional
+
+from einops import rearrange
+import torch
+from torch import nn
+import torch.distributed.tensor
+from torch.distributed.tensor import DTensor
+
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
+from torchtitan.models.llama3.model import Attention, precompute_freqs_cis
+from torchtitan.models.norms import build_norm
+from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
+from torchtitan.tools.logging import logger
+
+from .SeparateParamsGroupedExperts import SeparateParamsGroupedExperts
+from .GroupedExperts import GroupedExperts
+
+experts_impl_dict = {
+    "separate": SeparateParamsGroupedExperts,
+    "group": GroupedExperts,
+}
+
+
+@dataclass
+class MoEModelArgs(BaseModelArgs):
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: Optional[int] = None
+    vocab_size: int = -1  # defined later by tokenizer
+    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    ffn_dim_multiplier: Optional[float] = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
+
+    max_seq_len: int = 2048
+    # If `True`, then each transformer block init uses its layer ID, and if
+    # `False`, each uses the total number of transformer blocks
+    depth_init: bool = True
+    norm_type: str = "rmsnorm"
+    qk_norm: bool = False
+
+    use_flex_attn: bool = False
+    attn_mask_type: str = "causal"
+    eos_id: int = 0
+
+    # Number of additional modules to insert for multi-token prediction.
+    num_mtp_modules: int = 0
+
+    # ==== MoE specific args ====
+    n_shared_experts: int = 1
+    n_routed_experts: int = 0
+    activate_experts: int = 0
+    moe_gate_bias_update_speed: float = 0.001
+    moe_aux_loss_alpha: float = 0.01
+    moe_gate_use_bias_for_routing: bool = True
+    experts_impl: str = (
+        "group"  # "group" or "separate", separate-params works with muon for now
+    )
+
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        for name in [
+                "first_in_init_fn_type",
+                "first_in_init_std",
+                "first_in_exp",
+                "intermediate_init_fn_type",
+                "intermediate_init_std",
+                "intermediate_exp",
+                "init_gate_as_residual",
+                "final_out_init_fn_type",
+                "final_out_init_std",
+                "final_out_exp",
+                "norm_type",
+                "use_flex_attn",
+                "attn_mask_type",
+        ]:
+            value = getattr(job_config.model, name)
+            setattr(self, name, value)
+        self.vocab_size = tokenizer.n_words
+        if job_config.model.vocab_size_multiple_of:
+            vocab_divisor = job_config.model.vocab_size_multiple_of
+            self.vocab_size = int(
+                math.ceil(self.vocab_size / vocab_divisor)
+                * vocab_divisor
+            )
+            logger.info(
+                f"Padded vocab size from {tokenizer.n_words} to {self.vocab_size}."
+            )
+        self.max_seq_len = job_config.training.seq_len
+
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
+        nparams_not_ffn = 0
+        nparams_ffn = 0
+
+        for p_name, param in model.named_parameters():
+            if "feed_forward.experts" in p_name:
+                nparams_ffn += param.numel()
+            else:
+                nparams_not_ffn += param.numel()
+
+        if hasattr(model, "get_sparsity_ratio"):
+            sparsity_ratio = model.get_sparsity_ratio()
+        else:
+            sparsity_ratio = 1
+
+        nparams_active = nparams_not_ffn + nparams_ffn * sparsity_ratio
+        nparams_total = nparams_not_ffn + nparams_ffn
+
+        nparams_embedding = sum(
+            sum(p.numel() for p in m.parameters())
+            for m in model.children()
+            if isinstance(m, nn.Embedding)
+        )
+
+        l, h, q, t = (
+            self.n_layers,
+            self.n_heads,
+            self.dim // self.n_heads,
+            seq_len,
+        )
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
+        num_flops_per_token = 6 * (nparams_active - nparams_embedding) + 12 * l * h * q * t
+
+        return nparams_total, num_flops_per_token
+
+
+class Gate(nn.Module):
+    def __init__(
+        self, hidden_size: int, experts=8, topk=2, bias=True, bias_update_speed=0.01
+    ):
+        super().__init__()
+
+        self.topk = topk
+        self.experts = experts
+        self.expert_embeddings = nn.Parameter(torch.randn(experts, hidden_size))
+        # Expert embeddings
+        bias = False if experts <= 1 else bias  # no bias for single expert
+        self.bias = (
+            nn.Parameter(torch.zeros(experts), requires_grad=False) if bias else None
+        )
+        # Bias for load balancing
+        self.bias_update_speed = bias_update_speed
+        # Step size for updating bias dynamically
+
+        # Cache for accumulated adjustments
+        self._accumulated_adjustment = None
+        self._num_accumulated = 0
+        self.needs_reduce_bias_update = False
+
+    def __repr__(self):
+        return f"Gate(experts={self.experts}, topk={self.topk}, bias={self.bias is not None})"
+
+    def init_weights(self):
+        # nn.init.xavier_uniform_(self.expert_embeddings)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+
+    def forward(self, x: torch.Tensor, update_bias: bool = False) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (B*S, D)
+            update_bias: Whether to accumulate bias adjustments (only during training)
+        Returns:
+            weights: Normalized routing weights (B*S, K)
+            indices: Selected expert indices (B*S, K)
+        """
+        # Compute expert selection scores (sigmoid-based gating)
+        scores = x @ self.expert_embeddings.T
+        scores = torch.sigmoid(scores.to(torch.float32))
+
+        if self.bias is not None:
+            top_values, indices = torch.topk(scores + self.bias, self.topk, dim=-1)
+        else:
+            top_values, indices = torch.topk(scores, self.topk, dim=-1)
+
+        # Extract and normalize weights
+        weights = scores.gather(-1, indices)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+
+        if update_bias and self.bias is not None:
+            self.accumulate_adjustment(indices)
+
+        return weights.type_as(x), indices, scores
+
+    def accumulate_adjustment(self, indices: torch.Tensor):
+        """
+        Accumulate local expert counts without any all-reduce.
+        """
+        with torch.no_grad():
+            # Count local expert usage only
+            local_expert_counts = torch.bincount(
+                indices.flatten(), minlength=self.experts
+            ).float()
+
+            # Just store the local counts
+            if self._accumulated_adjustment is None:
+                self._accumulated_adjustment = local_expert_counts
+            else:
+                self._accumulated_adjustment += local_expert_counts
+            self._num_accumulated += 1
+            self.needs_reduction = True
+
+    def update(self):
+        """
+        Apply accumulated bias adjustments and clear the cache.
+        Now with all-reduce moved here (after backward).
+        """
+        if self._accumulated_adjustment is not None and self._num_accumulated > 0:
+            with torch.no_grad():
+                if self.needs_reduction:
+                    # Only do the all-reduce if needed and not already done
+                    torch.distributed.all_reduce(
+                        self._accumulated_adjustment, op=torch.distributed.ReduceOp.SUM
+                    )
+                    self.needs_reduction = False
+
+                # Calculate and apply adjustment
+                avg_usage = self._accumulated_adjustment.mean()
+                load_error = avg_usage - self._accumulated_adjustment
+                adjustment = torch.sign(load_error) * self.bias_update_speed
+
+                if isinstance(self.bias.data, DTensor):
+                    update = torch.distributed.tensor.distribute_tensor(
+                        adjustment.detach(),
+                        device_mesh=self.bias.data.device_mesh,
+                        placements=self.bias.data.placements,
+                    )
+                    self.bias.data.add_(update)
+                else:
+                    self.bias.data.add_(adjustment.detach())
+
+                self._accumulated_adjustment *= 0
+                self._num_accumulated = 0
+
+
+class MoE(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        multiple_of: int = 256,
+        shared_experts: int = 2,
+        n_routed_experts: int = 8,
+        activate_experts: int = 2,
+        ffn_dim_multiplier: Optional[float] = None,
+        match_dim_with_dense: bool = True,
+        use_bias_for_routing: bool = True,
+        bias_update_speed: float = 0.01,  # Bias adjustment speed
+        aux_loss_alpha: float = 0.01,  # Small weight for sequence-wise auxiliary loss
+        experts_impl: str = "group",  # "group" or "separate"
+    ):
+        super().__init__()
+        """
+        match_dim_with_dense.
+
+        Saying the dense model have the 'hidden_size' of 1024,
+        Then "actual_dim * activate_experts = hidden_size" should be satisfied.
+        """
+        assert (
+            shared_experts > 0
+        ), "when moved from my libs to this one, something goes wrong for shared_experts=0"
+        if match_dim_with_dense:
+            total_activate_experts = shared_experts + activate_experts
+            ratio = total_activate_experts / (n_routed_experts + shared_experts)
+        else:
+            ratio = 1.0
+        hidden_dim = 4 * dim
+        hidden_dim = int(2 * hidden_dim / 3 * ratio)
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim * 1.0)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+        mlp_func = partial(
+            FeedForward,
+            dim=dim,
+            hidden_dim=hidden_dim,
+        )
+        self.n_routed_experts = n_routed_experts
+        self.topk = activate_experts
+        self.shared_experts = shared_experts
+        self.aux_loss_alpha = aux_loss_alpha  # Loss coefficient
+
+        # Use updated Gate with DeepSeekMoE-style routing and bias balancing
+        self.gate = Gate(
+            hidden_size=dim,
+            experts=n_routed_experts,
+            topk=activate_experts,
+            bias=use_bias_for_routing,
+            bias_update_speed=bias_update_speed,
+        )
+
+        experts_impl_cls = experts_impl_dict[experts_impl]
+        # Shared Experts (applies to all tokens)
+        if n_shared_experts > 0:
+            self.shared_experts = experts_impl_cls(
+                dim_in=dim, dim_out=hidden_dim, num_experts=n_shared_experts
+            )
+
+        else:
+            self.shared_experts = None
+
+        # Routed Experts (only used when selected)
+        if n_routed_experts > 0:
+            self.experts = experts_impl_cls(
+                dim_in=dim, dim_out=hidden_dim, num_experts=n_routed_experts
+            )
+
+        else:
+            self.experts = None
+
+    def init_weights(self, init_std: float):
+        for expert in self.experts:
+            expert.init_weights(init_std)
+        if self.shared_experts is not None:
+            self.shared_experts.init_weights(init_std)
+        self.gate.init_weights()
+
+    def update_gate_bias(self):
+        self.gate.update()
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        B, S, D = x.size()
+        x = rearrange(x, "b s d -> (b s) d")  # Flatten batch & sequence
+        out = torch.zeros_like(x)
+
+        if self.topk > 0:
+            # (B*S, K), (B*S, K)
+            weights, indices, scores = self.gate(x, update_bias=self.training)
+
+            with torch.no_grad():
+                # [seq_len, n_routed_experts]
+                cnts = indices.new_zeros((indices.shape[0], self.n_routed_experts))
+                # Fill 1 to the selected experts
+                cnts.scatter_(1, indices, 1)
+                tokens_per_expert = cnts.sum(dim=0)
+                # Token indices for each expert
+                idxs = indices.view(-1).argsort()
+                sorted_tokens_shape = idxs.shape + x.shape[1:]
+
+            sorted_tokens = x[idxs // indices.shape[1]]
+
+            routed_output = self.experts(sorted_tokens, tokens_per_expert)
+
+            # Prepare the output buffer
+            out = torch.zeros_like(x)
+
+            # Map back from sorted tokens to original positions
+            original_token_indices = idxs // indices.shape[1]
+
+            # Apply weights
+            expert_weights = weights.view(-1)[idxs].unsqueeze(1)
+            weighted_outputs = routed_output * expert_weights
+            out.index_add_(0, original_token_indices, weighted_outputs)
+
+        # Apply shared experts if they exist
+        if self.shared_experts is not None:
+            # Reshape input for shared experts: (n_shared_experts, B*S, dim)
+
+            shared_input = torch.cat([x] * self.n_shared_experts, dim=0)
+            tokens_per_expert = torch.ones(self.n_shared_experts, device=x.device) * (
+                bz * slen
+            )
+
+            shared_output = self.shared_experts(shared_input, tokens_per_expert)
+            shared_output = rearrange(
+                shared_output, "(ep bs) d -> ep bs d", ep=self.n_shared_experts
+            ).sum(0)
+
+            out = out + shared_output
+
+        if self.training and self.aux_loss_alpha > 0 and self.topk > 0:
+            aux_loss = self.sequence_wise_aux_loss(indices, scores, bz, slen)
+        else:
+            aux_loss = torch.tensor(0.0, device=x.device)
+
+        routing_entropy = -(weights * weights.log()).sum(dim=-1).mean()
+
+        output = rearrange(
+            shared_outputs + routed_outputs, "(b s) d -> b s d", b=B, s=S
+        )
+        return output, aux_loss, routing_entropy
+
+    def sequence_wise_aux_loss(
+        self,
+        indices: torch.Tensor,
+        scores: torch.Tensor,
+        B: int,
+        S: int,
+        eps: float = 1e-15,
+    ) -> torch.Tensor:
+        """
+        Computes the Sequence-Wise Auxiliary Loss as described in DeepSeekMoE.
+
+        Args:
+            indices (torch.Tensor): Selected expert indices (B*S, K).
+            weights (torch.Tensor): Routing weights (B*S, K).
+            scores (torch.Tensor): Raw expert scores before top-k selection (B*S, N_r).
+            B (int): Batch size.
+            S (int): Sequence length.
+
+        Returns:
+            aux_loss (torch.Tensor): Computed sequence-wise auxiliary loss.
+        """
+
+        N_r = self.n_routed_experts  # Total number of routed experts
+        topk = self.topk  # Number of experts per token
+
+        # Compute expert frequency f_i (fraction of tokens assigned to expert i)
+        f_i = torch.zeros(N_r, device=indices.device, dtype=scores.dtype)
+        flat_indices = indices.view(-1)  # (B*S*K)
+        f_i.scatter_add_(
+            0, flat_indices, torch.ones_like(flat_indices, dtype=scores.dtype)
+        )
+        f_i = f_i / (B * S * topk + eps)  # Eq. (18)
+
+        # Compute normalized expert probabilities P_i
+        norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(
+            min=eps
+        )  # Eq. (19)
+
+        # Compute mean score per expert across all tokens
+        P_i = torch.zeros(N_r, device=scores.device, dtype=scores.dtype)
+        for k in range(topk):
+            expert_idx = indices[:, k]  # (B*S,)
+            selected_scores = norm_scores.gather(1, expert_idx.unsqueeze(-1)).squeeze(
+                -1
+            )
+            P_i.scatter_add_(0, expert_idx, selected_scores)
+
+        P_i = P_i / (B * S + eps)  # Eq. (20)
+        # f_i = torch.clamp(f_i, min=0, max=1)
+        # P_i = torch.clamp(P_i, min=0, max=1)
+
+        # Final auxiliary loss: L_bal = alpha * sum_i (f_i * P_i) -- Eq. (17)
+        aux_loss = (f_i * P_i).sum() * self.aux_loss_alpha
+
+        return aux_loss
+
+
+class TransformerBlock(nn.Module):
+    """
+    TransformerBlock Module
+
+    Args:
+        layer_id (int): Identifier for the layer.
+        model_args (TransformerModelArgs): Model configuration arguments.
+
+    Attributes:
+        n_heads (int): Number of attention heads.
+        dim (int): Dimension size of the model.
+        head_dim (int): Dimension size of each attention head.
+        attention (Attention): Attention module.
+        feed_forward (FeedForward): FeedForward module.
+        layer_id (int): Identifier for the layer.
+        attention_norm (RMSNorm): Layer normalization for attention output.
+        ffn_norm (RMSNorm): Layer normalization for feedforward output.
+
+    """
+
+    attention_cls = Attention
+    feed_forward_cls = MoE
+
+    def __init__(self, layer_id: int, model_args: MoEModelArgs):
+        super().__init__()
+        self.n_heads = model_args.n_heads
+        self.dim = model_args.dim
+        self.attention = self.attention_cls(model_args)
+        self.feed_forward = self.feed_forward_cls(
+            dim=model_args.dim,
+            multiple_of=model_args.multiple_of,
+            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            shared_experts=model_args.shared_experts,
+            n_routed_experts=model_args.n_routed_experts,
+            activate_experts=model_args.activate_experts,
+            use_bias_for_routing=model_args.moe_gate_use_bias_for_routing,
+            bias_update_speed=model_args.moe_gate_bias_update_speed,
+            aux_loss_alpha=model_args.moe_aux_loss_alpha,
+            match_dim_with_dense=True,
+            experts_impl=model_args.experts_impl,
+        )
+
+        self.layer_id = layer_id
+        self.num_layers = model_args.n_layers
+
+        self.attention_norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+        self.ffn_norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+
+        if model_args.depth_init:
+            self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
+        else:
+            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+
+    def update_gate_bias(self):
+        self.feed_forward.update_gate_bias()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ):
+        """
+        Perform a forward pass through the TransformerBlock.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+
+        Returns:
+            torch.Tensor: Output tensor after applying attention and feedforward layers.
+
+        """
+        h = x + self.attention(self.attention_norm(x), freqs_cis)
+
+        mlp_output, moe_aux_loss, routing_entropy = self.feed_forward(self.ffn_norm(h))
+
+        out = h + mlp_output
+        return out, moe_aux_loss, routing_entropy
+
+    def init_weights(self):
+        for norm in (self.attention_norm, self.ffn_norm):
+            norm.reset_parameters()
+        self.attention.init_weights(self.weight_init_std)
+        self.feed_forward.init_weights(self.weight_init_std)
+
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        self.attention.init_kv_cache(max_batch_size, max_seq_length)
+
+
+class Transformer(nn.Module, ModelProtocol):
+    """
+    Transformer Module
+
+    Args:
+        model_args (TransformerModelArgs): Model configuration arguments.
+
+    Attributes:
+        model_args (TransformerModelArgs): Model configuration arguments.
+        vocab_size (int): Vocabulary size.
+        n_layers (int): Number of layers in the model.
+        tok_embeddings (ParallelEmbedding): Token embeddings.
+        layers (torch.nn.ModuleList): List of Transformer blocks.
+        norm (RMSNorm): Layer normalization for the model output.
+        output (ColumnParallelLinear): Linear layer for final output.
+        freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+
+    """
+
+    transformer_block_cls = TransformerBlock
+
+    def __init__(self, model_args: MoEModelArgs):
+        if model_args.num_mtp_modules > 0:
+            raise ValueError("currently, MTP is not supported with MoE")
+        super().__init__()
+        self.model_args = model_args
+        self.vocab_size = model_args.vocab_size
+        self.n_layers = model_args.n_layers
+
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+
+        # TODO persistent should be set to false, since this buffer can be recomputed.
+        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
+        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
+        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
+        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
+        # initialized by the checkpoint, or we need to add a separate initializer for
+        # just the non-persistent buffers that is called after loading checkpoints.
+        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
+
+        self.layers = torch.nn.ModuleDict()
+        for layer_id in range(model_args.n_layers):
+            self.layers[str(layer_id)] = self.transformer_block_cls(layer_id, model_args)
+
+        self.norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+
+        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.init_weights()
+
+    def init_weights(
+        self,
+        buffer_device: Optional[torch.device] = None,
+    ):
+        """
+        [Note: On ``init_weights`` vs. ``reset_parameters``]
+        Modules may define ``reset_parameters`` to initialize parameter values.
+        ``reset_parameters`` is meant to only initialize directly owned
+        parameters/buffers, not those of their child modules, and it can be
+        used to give the initial values for these tensors.
+        Separately, users may want custom initialization for their modules,
+        different from that in ``reset_parameters``. For this, we define
+        ``init_weights``. We only call it in the constructor of this
+        ``Transformer`` root module to avoid reinitializing tensors.
+        """
+        buffer_device = buffer_device or self.freqs_cis.device
+        with torch.device(buffer_device):
+            self.freqs_cis = self._precompute_freqs_cis()
+        if self.tok_embeddings is not None:
+            nn.init.normal_(self.tok_embeddings.weight)
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_weights()
+        if self.norm is not None:
+            self.norm.reset_parameters()
+        final_out_std = self.model_args.dim**-0.5
+        cutoff_factor = 3
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
+        if self.model_args.num_mtp_modules > 0:
+            for layer in self.mtp_layers.values():
+                if layer is not None:
+                    layer.init_weights()
+
+    def _precompute_freqs_cis(self) -> torch.Tensor:
+        return precompute_freqs_cis(
+            self.model_args.dim // self.model_args.n_heads,
+            # Need to compute until at least the max token limit for generation
+            # TODO: explain in docs/composability.md why we removed the 2x
+            # relaxing in our CP enablement PR
+            self.model_args.max_seq_len,
+            self.model_args.rope_theta,
+        )
+
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_kv_cache(max_batch_size, max_seq_length)
+
+    def update_gate_bias(self):
+        gates_to_update = []
+        accumulated_adjustments = []
+
+        for layer in self.layers.values():
+            if hasattr(layer.feed_forward, "gate"):
+                gate = layer.feed_forward.gate
+                if (
+                    gate._accumulated_adjustment is not None
+                    and gate._num_accumulated > 0
+                ):
+                    gates_to_update.append(gate)
+                    accumulated_adjustments.append(gate._accumulated_adjustment)
+
+        if gates_to_update:
+            device = accumulated_adjustments[0].device
+            all_local_counts = torch.cat(accumulated_adjustments)
+
+            torch.distributed.all_reduce(
+                all_local_counts, op=torch.distributed.ReduceOp.SUM
+            )
+
+            start_idx = 0
+            for gate in gates_to_update:
+                experts = gate.experts
+                gate._accumulated_adjustment = all_local_counts[
+                    start_idx:start_idx + experts
+                ].clone()
+                gate.needs_reduction = False  # Mark as reduced
+                start_idx += experts
+
+        for layer in self.layers.values():
+            if hasattr(layer, "update_gate_bias"):
+                layer.update_gate_bias()
+
+    def get_sparsity_ratio(self):
+        # we assume all layers have the same number of activated and routed experts
+        total_experts = self.model_args.n_routed_experts
+        activated_experts = self.model_args.activate_experts
+        if total_experts == 0:
+            return 1
+        return activated_experts / total_experts
+
+    def forward(self, tokens: torch.Tensor):
+        """
+        Perform a forward pass through the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input token indices.
+
+        Returns:
+            torch.Tensor: Output logits after applying the Transformer model.
+
+        """
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        total_moe_aux_loss = 0
+        moe_entropy_per_layer = {}
+
+        for layer in self.layers.values():
+            h, moe_aux_loss, routing_entropy = layer(h, self.freqs_cis)
+            total_moe_aux_loss += moe_aux_loss
+            moe_entropy_per_layer[layer.layer_id] = routing_entropy.detach()
+
+        h = self.norm(h) if self.norm else h
+        output = self.output(h) if self.output else h
+        return output, total_moe_aux_loss, moe_entropy_per_layer
+
+    @classmethod
+    def from_model_args(cls, model_args: MoEModelArgs) -> "Transformer":
+        """
+        Initialize a Transformer model from a TransformerModelArgs object.
+
+        Args:
+            model_args (TransformerModelArgs): Model configuration arguments.
+
+        Returns:
+            Transformer: Transformer model.
+
+        """
+        return cls(model_args)

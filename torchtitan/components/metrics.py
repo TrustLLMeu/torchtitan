@@ -313,6 +313,8 @@ class MetricsProcessor:
     ntokens_since_last_log: int
     data_loading_times: list[float]
     accumulated_losses: list[torch.Tensor]
+    accumulated_aux_losses: list[torch.Tensor]
+    accumulated_moe_entropy_per_layer: list[dict[int, torch.Tensor]]
     time_last_log: float
 
     num_flops_per_token: int
@@ -342,6 +344,8 @@ class MetricsProcessor:
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
         self.accumulated_losses = []
+        self.accumulated_aux_losses = []
+        self.accumulated_moe_entropy_per_layer = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

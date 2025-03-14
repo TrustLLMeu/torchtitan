@@ -63,7 +63,23 @@ class TransformerModelArgs(BaseModelArgs):
         self.attn_mask_type = job_config.model.attn_mask_type
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        nparams = sum(p.numel() for p in model.parameters())
+        nparams_not_ffn = 0
+        nparams_ffn = 0
+
+        for p_name, param in model.named_parameters():
+            if "feed_forward.experts" in p_name:
+                nparams_ffn += param.numel()
+            else:
+                nparams_not_ffn += param.numel()
+
+        if hasattr(model, "get_sparsity_ratio"):
+            sparsity_ratio = model.get_sparsity_ratio()
+        else:
+            sparsity_ratio = 1
+
+        nparams_active = nparams_not_ffn + nparams_ffn * sparsity_ratio
+        nparams_total = nparams_not_ffn + nparams_ffn
+
         nparams_embedding = sum(
             sum(p.numel() for p in m.parameters())
             for m in model.children()
@@ -82,9 +98,9 @@ class TransformerModelArgs(BaseModelArgs):
         #    but recomputation should not be counted in calculating MFU           (+0)
         # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
         # 4. we follow the convention and do not account for sparsity in causal attention
-        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        num_flops_per_token = 6 * (nparams_active - nparams_embedding) + 12 * l * h * q * t
 
-        return nparams, num_flops_per_token
+        return nparams_total, num_flops_per_token
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
