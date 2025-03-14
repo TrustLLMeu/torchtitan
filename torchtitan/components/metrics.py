@@ -11,7 +11,11 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig
@@ -113,6 +117,11 @@ class TensorBoardLogger(BaseLogger):
     """Logger implementation for TensorBoard."""
 
     def __init__(self, log_dir: str, tag: Optional[str] = None):
+        if SummaryWriter is None:
+            raise ImportError(
+                "TensorBoard logging requires TensorBoard, please install it using "
+                "`pip install tensorboard`."
+            )
         self.tag = tag
         self.writer = SummaryWriter(log_dir, max_queue=1000)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
