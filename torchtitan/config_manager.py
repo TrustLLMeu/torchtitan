@@ -257,6 +257,9 @@ class JobConfig:
             "--optimizer.eps", type=float, default=1e-8, help="Epsilon value to use"
         )
         self.parser.add_argument(
+            "--optimizer.weight_decay", type=float, default=0.1, help="Weight decay value to use"
+        )
+        self.parser.add_argument(
             "--optimizer.implementation",
             type=str,
             default="fused",

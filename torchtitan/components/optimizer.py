@@ -265,6 +265,7 @@ def build_optimizers(
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
     eps = job_config.optimizer.eps
+    weight_decay = job_config.optimizer.weight_decay
 
     optim_implementation = job_config.optimizer.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
@@ -276,7 +277,7 @@ def build_optimizers(
         "lr": lr,
         "eps": eps,
         "betas": (0.9, 0.95),
-        "weight_decay": 0.1,
+        "weight_decay": weight_decay,
         "fused": fused,
         "foreach": foreach,
     }
