@@ -351,7 +351,14 @@ class MetricsProcessor:
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
 
-    def log(self, step: int, global_avg_loss: float, global_max_loss: float):
+    def log(
+            self,
+            step: int,
+            global_avg_loss: float,
+            global_max_loss: float,
+            extra_log_data: Optional[dict[str, Any]] = None,
+            extra_print_data: str = "",
+    ):
         assert self.num_flop_per_token > 0, "num_flop_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
@@ -388,6 +395,8 @@ class MetricsProcessor:
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
+        if extra_log_data is not None:
+            metrics.update(extra_log_data)
         self.logger.log(metrics, step)
 
         color = self.color
@@ -399,6 +408,7 @@ class MetricsProcessor:
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            f"{extra_print_data}"
         )
 
         self.ntokens_since_last_log = 0
