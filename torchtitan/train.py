@@ -285,9 +285,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"({device_mem_stats.max_reserved_pct:.2f}%)"
         )
 
+        muon_kwargs = {"world_mesh": world_mesh}
+
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config, ft_manager
+            self.model_parts, job_config, ft_manager, muon_kwargs
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config
