@@ -25,7 +25,7 @@ __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_r
 # TODO: It's unclear if this API is general enough to be used by other models.
 # If not, we should move it to a Transformer-specific directory.
 def generate_split_points(
-    pipeline_parallel_schedule: str, pp_dim: int, num_layers: int
+    pipeline_parallel_schedule: str, pp_dim: int, num_layers: int, num_mtp_layers: int = 0
 ) -> list[str]:
     """
     Generate a default split point based on the number of layers and
@@ -34,7 +34,9 @@ def generate_split_points(
     Args:
         job_config (JobConfig): The job configuration.
         pp_dim (int): The pipeline parallel dimension.
-        num_layers (int): The number of layers in the model.
+        num_layers (int): The number of total layers in the model (including
+            MTP layers).
+        num_mtp_layers (int): The number of MTP layers in the model.
 
     Returns:
         list[str]: A list of split point FQNs.
@@ -56,6 +58,7 @@ def generate_split_points(
     base_interval = num_layers // total_stages
     extra_layers = num_layers % total_stages
 
+    num_non_mtp_layers = num_layers - num_mtp_layers
     splits = []
     current_layer = 0
     for i in range(total_stages - 1):
@@ -68,7 +71,10 @@ def generate_split_points(
                 extra_layers -= 1
             else:
                 current_layer += base_interval
-        splits.append("layers." + str(current_layer))
+        if current_layer >= num_non_mtp_layers:
+            splits.append("mtp_layers." + str(current_layer - num_non_mtp_layers))
+        else:
+            splits.append("layers." + str(current_layer))
     logger.info(
         f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} "
         "This may be sub-optimal as the number of layers per stage may be unbalanced."
