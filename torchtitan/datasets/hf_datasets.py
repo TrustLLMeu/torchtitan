@@ -171,6 +171,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        num_mtp_tokens: int = 0,
         dataset_inner_name: str | None = None,
         dataset_files: str | Sequence[str] | None = None,
         dataset_split: str = "train",
@@ -195,6 +196,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._tokenizer = tokenizer
         self.infinite = infinite
+        self.num_mtp_tokens = num_mtp_tokens
         self._text_processor = text_processor
 
         # Variables for checkpointing
