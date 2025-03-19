@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import importlib
 import os
 import time
@@ -18,7 +19,11 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import (
+    build_cross_entropy_loss,
+    multi_token_cross_entropy_loss,
+    rescale_accumulated_loss,
+)
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -187,6 +192,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.loss_fn = self.train_spec.build_loss_fn(
             job_config, parallel_dims=parallel_dims, ft_manager=self.ft_manager
         )
+
+        if job_config.training.num_mtp_tokens > 0:
+            assert (
+                self.train_spec.build_loss_fn is build_cross_entropy_loss
+            ), "MTP requires cross-entropy loss"
+            self.loss_fn = functools.partial(
+                multi_token_cross_entropy_loss,
+                job_config=job_config,
+            )
 
         # verify batch sizes
         global_batch_size = job_config.training.global_batch_size
@@ -535,8 +549,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with self.maybe_enable_amp:
                     output = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     if isinstance(output, tuple):
-                        assert len(output) == 2
-                        pred, aux_loss = output
+                        if self.job_config.training.num_mtp_tokens > 0:
+                            pred = output[0]
+                        else:
+                            assert len(output) == 2
+                            pred, aux_loss = output
                     else:
                         pred = output
                     loss = self.loss_fn(pred, labels)
