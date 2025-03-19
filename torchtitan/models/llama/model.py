@@ -8,7 +8,7 @@
 
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +36,9 @@ class TransformerModelArgs(BaseModelArgs):
     depth_init: bool = True
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
+
+    # Number of additional modules to insert for multi-token prediction.
+    num_mtp_modules: int = 0
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -355,6 +358,65 @@ class TransformerBlock(nn.Module):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
+class MTPModule(nn.Module):
+    def __init__(
+            self,
+            layer_id: int,
+            model_args: TransformerModelArgs,
+            parent_transformer: nn.Module,
+    ):
+        super().__init__()
+        self.parent_transformer = parent_transformer
+
+        # TODO handle these for pipelining
+        self.tok_embeddings = self.parent_transformer.tok_embeddings
+        self.freqs_cis = self.parent_transformer.freqs_cis
+        self.norm = self.parent_transformer.norm
+        self.output = self.parent_transformer.output
+
+        self.in_norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+        self.mtp_proj = nn.Linear(2 * model_args.dim, model_args.dim)
+        self.block = parent_transformer.transformer_block_cls(layer_id, model_args)
+
+        self.init_weights()
+
+    def init_weights(self):
+        self.in_norm.reset_parameters()
+        # Re-use block's init std.
+        self.mtp_proj.init_weights(self.block.weight_init_std)
+        self.block.init_weights()
+
+    def forward(self, tokens: torch.Tensor, prev_embed: torch.Tensor):
+        """
+        Perform a forward pass through the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input token indices.
+            prev_embed (torch.Tensor): Output token embeddings of previous
+                Transformer layer (after output norm, before unembedding).
+
+        Returns:
+            torch.Tensor: Output logits after applying the Transformer model.
+            torch.Tensor: Output token embeddings after applying the Transformer model.
+
+        """
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = self.tok_embeddings(tokens)
+
+        h = self.in_norm(h)
+
+        h = torch.cat([h, prev_embed])
+        h = self.mtp_proj(h)
+        h = self.block(h, self.freqs_cis)
+
+        h = self.norm(h)
+        output = self.output(h)
+        prev_embed = h
+        return output, prev_embed
+
+
 class Transformer(nn.Module, ModelProtocol):
     """
     Transformer Module
@@ -402,6 +464,19 @@ class Transformer(nn.Module, ModelProtocol):
         )
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        # Optionally add MTP modules.
+        if model_args.num_mtp_modules > 0:
+            self.mtp_layers = torch.nn.ModuleDict()
+            for mtp_layer_id in range(model_args.num_mtp_modules):
+                layer_id = mtp_layer_id + model_args.n_layers
+                self.mtp_layers[str(mtp_layer_id)] = MTPModule(
+                    layer_id,
+                    model_args,
+                    self.tok_embeddings,
+                    self.output,
+                )
+
         self.init_weights()
 
     def init_weights(
@@ -450,26 +525,72 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(
+            self,
+            tokens_list: Union[list[Optional[torch.Tensor]], torch.Tensor],
+            orig_tokens: Optional[torch.Tensor] = None,
+            prev_embed: Optional[torch.Tensor] = None,
+    ):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices.
+            tokens_list (Union[list[Optional[torch.Tensor]], torch.Tensor]):
+                Input token indices.
+            orig_tokens (Optional[torch.Tensor]): Input token indices (even across
+                pipeline stages).
+            prev_embed (Optional[torch.Tensor]): Output token embeddings of
+                previous Transformer layer (after output norm, before
+                unembedding).
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            list[Optional[torch.Tensor]]: Output logits after applying the
+                Transformer model for each output token.
 
         """
+        if not isinstance(tokens_list, list):
+            tokens = tokens_list
+            tokens_list = [None] * (1 + self.model_args.num_mtp_modules)
+            tokens_list[0] = tokens
+        else:
+            tokens = tokens_list[0]
+
+        if orig_tokens is None:
+            orig_tokens = tokens
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = (
+            self.tok_embeddings(tokens[:, :self.model_args.max_seq_len])
+            if self.tok_embeddings
+            else tokens
+        )
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
+
         output = self.output(h) if self.output else h
-        return output
+        tokens_list[0] = output
+
+        # Calculate multi-token predictions.
+
+        if self.model_args.num_mtp_modules > 0:
+            # Check if output norm is in this stage. If yes, assign the
+            # hidden embedding.
+            if self.norm and prev_embed is None:
+                prev_embed = h
+
+            for (mtp_layer_id, mtp_layer) in self.mtp_layers.items():
+                mtp_layer_id = int(mtp_layer_id)
+                token_offset = mtp_layer_id + 1
+                output, prev_embed = mtp_layer(
+                    orig_tokens[:, token_offset:token_offset + self.model_args.max_seq_len],
+                    prev_embed,
+                )
+                tokens_list[mtp_layer_id + 1] = output
+
+        return tokens_list, orig_tokens, prev_embed
 
     @classmethod
     def from_model_args(cls, model_args: TransformerModelArgs) -> "Transformer":
