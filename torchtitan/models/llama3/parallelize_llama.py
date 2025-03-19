@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+import itertools
 
 import torch
 import torch.nn as nn
@@ -373,7 +374,10 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    for layer_id, transformer_block in model.layers.items():
+    transformer_blocks = model.layers.items()
+    if model.model_args.num_mtp_modules > 0:
+        transformer_blocks = itertools.chain(transformer_blocks, model.mtp_layers.items())
+    for layer_id, transformer_block in transformer_blocks:
         if reshard_after_forward_policy == "always":
             reshard_after_forward = True
         elif reshard_after_forward_policy == "never":

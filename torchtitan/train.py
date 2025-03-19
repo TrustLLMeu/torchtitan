@@ -18,6 +18,7 @@ import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import build_cross_entropy_loss, multi_token_cross_entropy_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -216,6 +217,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
 
+        if job_config.training.num_mtp_tokens > 0:
+            assert self.train_spec.build_loss_fn is build_cross_entropy_loss, \
+                "MTP requires cross-entropy loss"
+            self.loss_fn = functools.partial(
+                multi_token_cross_entropy_loss,
+                job_config=job_config,
+            )
+
         unwrapped_loss_fn = self.loss_fn
 
         @functools.wraps(unwrapped_loss_fn)
@@ -397,8 +406,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 output = model_parts[0](inputs)
                 if isinstance(output, tuple):
-                    assert len(output) == 3
-                    pred, aux_loss, moe_entropy_per_layer = output
+                    if self.job_config.training.num_mtp_tokens > 0:
+                        pred = output[0]
+                    else:
+                        assert len(output) == 3
+                        pred, aux_loss, moe_entropy_per_layer = output
                 else:
                     pred = output
                 loss = self.loss_fn(pred, labels)

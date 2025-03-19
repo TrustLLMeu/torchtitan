@@ -96,7 +96,8 @@ def pipeline_llama_manual_split(
         parallelism_config.pipeline_parallel_schedule,
         parallelism_config.pipeline_parallel_layers_per_stage,
         parallel_dims.pp,
-        model_config.n_layers,
+        model_config.n_layers + model_config.num_mtp_modules,
+        num_mtp_layers=model_config.num_mtp_modules,
     )
 
     def _build_stage(
@@ -119,8 +120,23 @@ def pipeline_llama_manual_split(
                 drop_layers = True
             if drop_layers:
                 del model.layers[name]
+        if model_config.num_mtp_modules > 0:
+            for name in list(model.mtp_layers.keys()):
+                # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
+                if f"mtp_layers.{name}" == start_layer:
+                    drop_layers = False
+                if f"mtp_layers.{name}" == stop_layer:
+                    drop_layers = True
+                if drop_layers:
+                    del model.mtp_layers[name]
 
-        if not is_last:
+        if (
+                not is_last
+                and not (
+                    start_layer.startswith("layers.")
+                    and stop_layer.startswith("mtp_layers.")
+                )
+        ):
             model.norm = None
             model.output = None
 

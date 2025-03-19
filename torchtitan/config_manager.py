@@ -375,6 +375,18 @@ class JobConfig:
             "--training.seq_len", type=int, default=2048, help="Sequence length"
         )
         self.parser.add_argument(
+            "--training.num_mtp_tokens",
+            type=int,
+            default=0,
+            help="Number of tokens to predict at once using multi-token prediction."
+        )
+        self.parser.add_argument(
+            "--training.mtp_loss_weight",
+            type=int,
+            default=0.3,
+            help="Weight of multi-token prediction loss term."
+        )
+        self.parser.add_argument(
             "--training.max_norm",
             type=float,
             default=1.0,

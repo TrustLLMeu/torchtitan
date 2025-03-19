@@ -32,6 +32,7 @@ def generate_split_points(
     num_layers: int,
     input_weight: int = 1,
     output_weight: int = 1,
+    num_mtp_layers: int = 0,
 ) -> list[str]:
     """
     Generate a list of split points based on the number of layers and
@@ -41,8 +42,10 @@ def generate_split_points(
         schedule_str (str): The string of the schedule name.
         layers_per_stage (int): The number of layers per stage.
         pp_dim (int): The pipeline parallel dimension.
-        num_layers (int): The number of layers in the model.
+        num_layers (int): The number of total layers in the model (including
+            MTP layers).
         input_output_weight (int): The number of layers to consider the input/output modules in the layer calculation.
+        num_mtp_layers (int): The number of MTP layers in the model.
 
     Returns:
         list[str]: A list of split point FQNs.
@@ -78,6 +81,7 @@ def generate_split_points(
     effective_num_layers = num_layers + input_weight + output_weight
     base_layers_per_stage = effective_num_layers // total_stages
 
+    num_non_mtp_layers = num_layers - num_mtp_layers
     splits = [""] * (total_stages - 1)
     current_layer_index = 0
 
@@ -102,7 +106,10 @@ def generate_split_points(
         if remainder > 0:
             current_layer_index += 1
             remainder -= 1
-        splits[i] = "layers." + str(current_layer_index)
+        if current_layer_index >= num_non_mtp_layers:
+            splits[i] = "mtp_layers." + str(current_layer_index - num_non_mtp_layers)
+        else:
+            splits[i] = "layers." + str(current_layer_index)
 
     logger.info(
         f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} "
