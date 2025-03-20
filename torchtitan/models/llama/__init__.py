@@ -99,6 +99,21 @@ register_train_spec(
 
 register_train_spec(
     TrainSpec(
+        name="byte_llama3",
+        cls=Transformer,
+        config=llama3_configs,
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_hf_dataloader,
+        build_tokenizer_fn=build_byte_tokenizer,
+        loss_fn=cross_entropy_loss,
+    )
+)
+
+register_train_spec(
+    TrainSpec(
         name="llama2",
         cls=Transformer,
         config=llama2_configs,
