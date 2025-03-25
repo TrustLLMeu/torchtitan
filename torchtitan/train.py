@@ -443,6 +443,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if aux_loss is not None:
                 self.metrics_processor.accumulated_aux_losses.append(loss.detach())
 
+        # for MoE model, update the gate bias
+        for model in model_parts:
+            if hasattr(model, "update_gate_bias"):
+                model.update_gate_bias()
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
             self.job_config.training.max_norm,

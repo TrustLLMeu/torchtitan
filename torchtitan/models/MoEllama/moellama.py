@@ -6,6 +6,7 @@ from einops import rearrange
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.llama.model import Attention, precompute_freqs_cis
 from torchtitan.models.norms import build_norm
@@ -57,12 +58,16 @@ class Gate(nn.Module):
         self.bias_update_speed = bias_update_speed
         # Step size for updating bias dynamically
 
+        # Cache for accumulated adjustments
+        self._accumulated_adjustment = None
+        self._num_accumulated = 0
+
     @torch.compiler.disable()
     def forward(self, x: torch.Tensor, update_bias: bool = False) -> torch.Tensor:
         """
         Args:
             x: Input tensor of shape (B*S, D)
-            update_bias: Whether to update the bias dynamically (only during training)
+            update_bias: Whether to accumulate bias adjustments (only during training)
         Returns:
             weights: Normalized routing weights (B*S, K)
             indices: Selected expert indices (B*S, K)
@@ -81,31 +86,72 @@ class Gate(nn.Module):
         weights = weights / weights.sum(dim=-1, keepdim=True)
 
         if update_bias and self.bias is not None:
-            self.update_bias(indices)
+            self._accumulate_adjustment(indices)
 
         return weights.type_as(x), indices, scores
 
-    def update_bias(self, indices: torch.Tensor):
+    def _accumulate_adjustment(self, indices: torch.Tensor):
         """
-        Adjust bias dynamically to prevent expert overload or underload.
-        If an expert is overused, decrease its bias. If underused, increase bias.
+        Accumulate bias adjustments with proper cross-rank synchronization.
         """
-        # Count how many times each expert is selected
-        # Update bias (ensuring gradients track it)
         with torch.no_grad():
-            expert_counts = torch.bincount(
+            # Count local expert usage
+            local_expert_counts = torch.bincount(
                 indices.flatten(), minlength=self.experts
             ).float()
 
-            # Normalize the expert usage
-            avg_usage = expert_counts.mean()  # Target average usage
-            adjustment = (expert_counts - avg_usage) * self.bias_update_speed
+            # All-reduce to get global counts across all ranks
+            global_expert_counts = local_expert_counts.clone()
+            torch.distributed.all_reduce(
+                global_expert_counts, op=torch.distributed.ReduceOp.SUM
+            )
 
-            # Reduce bias for overused experts, increase for underused
-            self.bias -= adjustment.detach()
+            # Normalize the expert usage based on global counts
+            avg_usage = global_expert_counts.mean()  # Target average usage
+            adjustment = (global_expert_counts - avg_usage) * self.bias_update_speed
 
-            # EMA version
-            # self.bias.mul_(0.9).add_(0.1 * adjustment.detach())
+            # Accumulate the adjustment
+            if self._accumulated_adjustment is None:
+                self._accumulated_adjustment = adjustment
+            else:
+                self._accumulated_adjustment += adjustment
+            self._num_accumulated += 1
+
+    def update(self):
+        """
+        Apply accumulated bias adjustments and clear the cache.
+        """
+        if self._accumulated_adjustment is not None and self._num_accumulated > 0:
+            with torch.no_grad():
+                if isinstance(self.bias.data, DTensor):
+                    original_placements = self.bias.placements
+                    original_mesh = self.bias.data.device_mesh
+
+                    # Move bias to replicated format, then to local for adjustment
+                    local_bias = self.bias.data.redistribute(
+                        placements=[Replicate()]
+                    ).to_local()
+                    local_bias.sub_(self._accumulated_adjustment.detach())
+
+                    # Rewrap and redistribute to original placements
+                    adjusted_bias = DTensor.from_local(
+                        local_bias, device_mesh=original_mesh, placements=[Replicate()]
+                    )
+                    self.bias.data = adjusted_bias.redistribute(
+                        placements=original_placements
+                    )
+
+                else:
+                    self.bias.data.sub_(self._accumulated_adjustment.detach())
+
+            self.clear_cache()
+
+    def clear_cache(self):
+        """
+        Clear the accumulated adjustments without applying them.
+        """
+        self._accumulated_adjustment = None
+        self._num_accumulated = 0
 
 
 class FeedForward(nn.Module):
@@ -215,6 +261,9 @@ class MoE(nn.Module):
         if self.shared_experts is not None:
             for expert in self.shared_experts:
                 expert.init_weights(init_std)
+
+    def update_gate_bias(self):
+        self.gate.update()
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         B, S, D = x.size()
@@ -382,6 +431,9 @@ class TransformerBlock(nn.Module):
         else:
             self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
 
+    def update_gate_bias(self):
+        self.feed_forward.update_gate_bias()
+
     def forward(
         self,
         x: torch.Tensor,
@@ -508,6 +560,10 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
         )
+
+    def update_gate_bias(self):
+        for layer in self.layers.values():
+            layer.update_gate_bias()
 
     def forward(self, tokens: torch.Tensor):
         """
