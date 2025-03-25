@@ -57,6 +57,7 @@ class Gate(nn.Module):
         self.bias_update_speed = bias_update_speed
         # Step size for updating bias dynamically
 
+    @torch.compiler.disable()
     def forward(self, x: torch.Tensor, update_bias: bool = False) -> torch.Tensor:
         """
         Args:
