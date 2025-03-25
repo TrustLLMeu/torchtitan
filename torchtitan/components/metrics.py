@@ -314,6 +314,7 @@ class MetricsProcessor:
     data_loading_times: list[float]
     accumulated_losses: list[float]
     accumulated_aux_losses: list[float]
+    accumulated_moe_entropy_per_layer: list[dict[int, float]]
     time_last_log: float
 
     num_flop_per_token: int
@@ -342,6 +343,7 @@ class MetricsProcessor:
         self.data_loading_times = []
         self.accumulated_losses = []
         self.accumulated_aux_losses = []
+        self.accumulated_moe_entropy_per_layer = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

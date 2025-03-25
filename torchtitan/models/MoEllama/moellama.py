@@ -579,14 +579,16 @@ class Transformer(nn.Module, ModelProtocol):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
         total_moe_aux_loss = 0
+        moe_entropy_per_layer = {}
 
         for layer in self.layers.values():
             h, moe_aux_loss, routing_entropy = layer(h, self.freqs_cis)
             total_moe_aux_loss += moe_aux_loss
+            moe_entropy_per_layer[layer.layer_id] = routing_entropy.detach()
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
-        return output, total_moe_aux_loss
+        return output, total_moe_aux_loss, moe_entropy_per_layer
 
     @classmethod
     def from_model_args(cls, model_args: MoEModelArgs) -> "Transformer":
