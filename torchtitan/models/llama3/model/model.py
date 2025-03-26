@@ -22,6 +22,7 @@ from torchtitan.models.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.models.inputs import MTPInputs, MTPInputsDict
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -594,28 +595,38 @@ class Transformer(nn.Module, ModelProtocol):
 
     def forward(
         self,
-        tokens_list: list[torch.Tensor | None] | torch.Tensor,
+        inputs: MTPInputs,
         attention_masks: AttentionMasksType | None = None,
-        prev_embed: torch.Tensor | None = None,
-    ):
+    ) -> MTPInputsDict:
         """
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens_list (Union[list[torch.Tensor | None], torch.Tensor]):
-                Input token indices if pipeline parallelism is not enabled.
-                If pipeline parallelism is enabled, this will be the input token indices
-                for the ranks on the first pipeline stage. This will be the activation of the
-                previous pipeline stage if the current rank is not on the first stage.
-            prev_embed (torch.Tensor | None): Output token embeddings of
-                previous Transformer layer (after output norm, before
-                unembedding).
+            inputs (MTPInputs): Single tensor or dictionary containing the
+                following keys and values:
+                - tokens_list (Union[list[torch.Tensor | None], torch.Tensor]):
+                  Input token indices if pipeline parallelism is not enabled.
+                  If pipeline parallelism is enabled, this will be the input token indices
+                  for the ranks on the first pipeline stage. This will be the activation of the
+                  previous pipeline stage if the current rank is not on the first stage.
+                - prev_embed (torch.Tensor | None): Output token embeddings
+                  of previous Transformer layer (after output norm, before
+                  unembedding).
 
         Returns:
-            list[torch.Tensor | None]: Output logits after applying the
-                Transformer model for each output token.
+            MTPInputsDict: Dictionary containing the following keys and
+                values:
+                - tokens_list (list[torch.Tensor | None]): Output logits
+                  after applying the Transformer model for each output token.
+                - prev_embed (torch.Tensor | None): Output token embeddings
+                  of previous Transformer layer (after output norm, before
+                  unembedding).
 
         """
+        if not isinstance(inputs, dict):
+            inputs = {"tokens_list": inputs}
+        tokens_list = inputs["tokens_list"]
+        prev_embed = inputs.get("prev_embed", None)
         if not isinstance(tokens_list, list):
             tokens = tokens_list
             tokens_list = [None] * (1 + self.model_args.num_mtp_modules)
@@ -662,4 +673,7 @@ class Transformer(nn.Module, ModelProtocol):
                 )
                 tokens_list[mtp_layer_id + 1] = output
 
-        return tokens_list, input_batch, prev_embed
+        return {
+            "tokens_list": tokens_list,
+            "prev_embed": prev_embed,
+        }
