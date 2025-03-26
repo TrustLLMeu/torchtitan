@@ -147,9 +147,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         assert self.gradient_accumulation_steps > 0
 
         if job_config.training.num_mtp_tokens > 0:
-            assert self.train_spec.loss_fn is cross_entropy_loss, "MTP requires cross-entropy loss"
+            pre_mtp_loss_fn = self.train_spec.loss_fn
+            assert pre_mtp_loss_fn in [cross_entropy_loss, moe_loss], \
+                "MTP requires cross-entropy loss"
             self.train_spec.loss_fn = functools.partial(
                 multi_token_cross_entropy_loss,
+                loss_fn=pre_mtp_loss_fn,
                 job_config=job_config,
             )
 
