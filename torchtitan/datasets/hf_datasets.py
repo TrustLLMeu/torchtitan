@@ -159,11 +159,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dataset_name: str,
         dataset_path: str | None,
         tokenizer: Tokenizer,
-        seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
-        num_mtp_tokens: int = 0,
         dataset_inner_name: str | None = None,
         dataset_files: str | Sequence[str] | None = None,
         dataset_split: str = "train",
@@ -187,14 +185,14 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._tokenizer = tokenizer
-        self.seq_len = seq_len
         self.infinite = infinite
-        self.num_mtp_tokens = num_mtp_tokens
         self._text_processor = text_processor
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_tokens: list[int] = []
+
+    def __len__(self):
+        return len(self._data)
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
@@ -206,13 +204,60 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         return it
 
     def __iter__(self):
-        max_buffer_token_len = 1 + self.seq_len + self.num_mtp_tokens
-
         while True:
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
+                self._sample_idx += 1
+                yield sample_tokens
+
+            if not self.infinite:
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                break
+            else:
+                # Reset offset for the next iteration
+                self._sample_idx = 0
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict["sample_idx"]
+
+    def state_dict(self):
+        return {"sample_idx": self._sample_idx}
+
+
+class GreedyPackedDataset(IterableDataset, Stateful):
+    def __init__(
+        self,
+        dataset: IterableDataset,
+        seq_len: int = 2048,
+        infinite: bool = False,
+        num_mtp_tokens: int = 0,
+    ) -> None:
+        self._data = dataset
+        self.seq_len = seq_len
+        self.infinite = infinite
+        self.num_mtp_tokens = num_mtp_tokens
+
+        # Variables for checkpointing
+        self._sample_idx = 0
+        self._all_tokens: list[int] = []
+
+    @property
+    def dataset_name(self):
+        return self._data.dataset_name
+
+    def _get_data_iter(self):
+        # We don't use the sample index because we defer skipping to the
+        # sub-dataset.
+        return iter(self._data)
+
+    def __iter__(self):
+        max_buffer_token_len = 1 + self.seq_len + self.num_mtp_tokens
+
+        while True:
+            for sample_tokens in self._get_data_iter():
                 self._all_tokens.extend(sample_tokens)
                 self._sample_idx += 1
 
@@ -225,19 +270,24 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     yield {"input": input}, label
 
             if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                logger.warning(f"Packed dataset {self.dataset_name} has run out of data")
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                logger.warning(f"Packed dataset {self.dataset_name} is being re-looped")
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
         self._all_tokens = state_dict["token_buffer"]
+        self._data.load_state_dict(state_dict["dataset"])
 
     def state_dict(self):
-        return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
+        return {
+            "token_buffer": self._all_tokens,
+            "sample_idx": self._sample_idx,
+            "dataset": self._data.state_dict(),
+        }
 
 
 def build_hf_dataloader(
@@ -263,16 +313,21 @@ def build_hf_dataloader(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
-        seq_len=seq_len,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
-        num_mtp_tokens=num_mtp_tokens,
         dataset_inner_name=dataset_inner_name,
         dataset_files=dataset_files,
         dataset_split=dataset_split,
         dataset_streaming=dataset_streaming,
         dataset_key=dataset_key,
+    )
+
+    hf_ds = GreedyPackedDataset(
+        dataset=hf_ds,
+        seq_len=seq_len,
+        infinite=infinite,
+        num_mtp_tokens=num_mtp_tokens,
     )
 
     rng = torch.Generator()
