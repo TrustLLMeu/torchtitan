@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import Optional
+from typing import NotRequired, Optional, TypedDict, Union
 
 from einops import rearrange
 import torch
@@ -41,6 +41,15 @@ class MoEModelArgs(BaseModelArgs):
     n_routed_experts: int = 8
     moe_gate_bias_update_speed: float = 0.01
     moe_aux_loss_alpha: float = 0.01
+
+
+class _MoEInputs(TypedDict):
+    tokens_list: Union[list[Optional[torch.Tensor]], torch.Tensor]
+    aux_loss: NotRequired[torch.Tensor]
+    moe_entropy_per_layer: NotRequired[torch.Tensor]
+
+
+MoEInputs = Union[torch.Tensor, _MoEInputs]
 
 
 class Gate(nn.Module):
@@ -565,21 +574,38 @@ class Transformer(nn.Module, ModelProtocol):
         for layer in self.layers.values():
             layer.update_gate_bias()
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, inputs: MoEInputs):
         """
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices.
+            inputs (MoEInputs): Single tensor or dictionary containing the
+                following keys and values:
+                - tokens_list (Union[list[Optional[torch.Tensor]],
+                  torch.Tensor]): Input token indices.
+                - aux_loss (torch.Tensor): Sequence-wise auxiliary balance loss.
+                - moe_entropy_per_layer (torch.Tensor): Entropy of MoE routing
+                  for each MoE layer.
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            MoEInputs: Dictionary containing the following keys and values:
+                - tokens_list (list[torch.Tensor]): Output logits after applying
+                  the Transformer model.
+                - aux_loss (torch.Tensor): Sequence-wise auxiliary balance loss.
+                - moe_entropy_per_layer (torch.Tensor): Entropy of MoE routing
+                  for each MoE layer.
 
         """
+        if not isinstance(inputs, dict):
+            inputs = {"tokens_list": inputs}
+        tokens = inputs["tokens_list"]
+        total_moe_aux_loss = inputs.get("aux_loss", 0)
+        moe_entropy_per_layer = inputs.get("moe_entropy_per_layer", {})
+        if isinstance(tokens, list):
+            tokens = tokens[0]
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-        total_moe_aux_loss = 0
-        moe_entropy_per_layer = {}
 
         for layer in self.layers.values():
             h, moe_aux_loss, routing_entropy = layer(h, self.freqs_cis)
@@ -588,7 +614,11 @@ class Transformer(nn.Module, ModelProtocol):
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
-        return output, total_moe_aux_loss, moe_entropy_per_layer
+        return {
+            "tokens_list": [output],
+            "aux_loss": total_moe_aux_loss,
+            "moe_entropy_per_layer": moe_entropy_per_layer,
+        }
 
     @classmethod
     def from_model_args(cls, model_args: MoEModelArgs) -> "Transformer":
