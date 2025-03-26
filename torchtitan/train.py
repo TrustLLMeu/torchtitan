@@ -19,13 +19,14 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import cross_entropy_loss, multi_token_cross_entropy_loss
+from torchtitan.components.loss import cross_entropy_loss, moe_loss, multi_token_cross_entropy_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.models.MoEllama.moellama import Transformer as MoETransformer
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -145,6 +146,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             // (job_config.training.batch_size * dp_degree)
         )
         assert self.gradient_accumulation_steps > 0
+
+        if issubclass(self.train_spec.cls, MoETransformer):
+            pre_moe_loss_fn = self.train_spec.loss_fn
+            self.train_spec.loss_fn = functools.partial(
+                moe_loss,
+                loss_fn=pre_moe_loss_fn,
+            )
 
         if job_config.training.num_mtp_tokens > 0:
             pre_mtp_loss_fn = self.train_spec.loss_fn
@@ -434,8 +442,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 moe_entropy_per_layer = pred.get("moe_entropy_per_layer", None)
 
                 loss = self.train_spec.loss_fn(pred, labels)
-                if aux_loss is not None:
-                    loss += aux_loss / self.gradient_accumulation_steps
 
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
