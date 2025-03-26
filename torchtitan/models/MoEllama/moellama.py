@@ -11,6 +11,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
+from torchtitan.models.inputs import MoEInputs, MoEInputsDict
 from torchtitan.models.llama3.model import Attention, precompute_freqs_cis
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
@@ -687,21 +688,38 @@ class Transformer(nn.Module, ModelProtocol):
             return 1
         return activated_experts / total_experts
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, inputs: MoEInputs) -> MoEInputsDict:
         """
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices.
+            inputs (MoEInputs): Single tensor or dictionary containing the
+                following keys and values:
+                - tokens_list (Union[list[Optional[torch.Tensor]],
+                  torch.Tensor]): Input token indices.
+                - aux_loss (torch.Tensor): Sequence-wise auxiliary balance loss.
+                - moe_entropy_per_layer (torch.Tensor): Entropy of MoE routing
+                  for each MoE layer.
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            MoEInputsDict: Dictionary containing the following keys and values:
+                - tokens_list (list[torch.Tensor]): Output logits after applying
+                  the Transformer model.
+                - aux_loss (torch.Tensor): Sequence-wise auxiliary balance loss.
+                - moe_entropy_per_layer (torch.Tensor): Entropy of MoE routing
+                  for each MoE layer.
 
         """
+        if not isinstance(inputs, dict):
+            inputs = {"tokens_list": inputs}
+        tokens = inputs["tokens_list"]
+        total_moe_aux_loss = inputs.get("aux_loss", 0)
+        moe_entropy_per_layer = inputs.get("moe_entropy_per_layer", {})
+        if isinstance(tokens, list):
+            tokens = tokens[0]
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-        total_moe_aux_loss = 0
-        moe_entropy_per_layer = {}
 
         for layer in self.layers.values():
             h, moe_aux_loss, routing_entropy = layer(h, self.freqs_cis)
@@ -710,7 +728,11 @@ class Transformer(nn.Module, ModelProtocol):
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
-        return output, total_moe_aux_loss, moe_entropy_per_layer
+        return {
+            "tokens_list": [output],
+            "aux_loss": total_moe_aux_loss,
+            "moe_entropy_per_layer": moe_entropy_per_layer,
+        }
 
     @classmethod
     def from_model_args(cls, model_args: MoEModelArgs) -> "Transformer":

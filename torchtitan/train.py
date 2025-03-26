@@ -404,15 +404,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                output = model_parts[0](inputs)
-                if isinstance(output, tuple):
-                    if self.job_config.training.num_mtp_tokens > 0:
-                        pred = output[0]
-                    else:
-                        assert len(output) == 3
-                        pred, aux_loss, moe_entropy_per_layer = output
-                else:
-                    pred = output
+                pred = model_parts[0](inputs)
+
+                aux_loss = pred.get("aux_loss", None)
+                moe_entropy_per_layer = pred.get("moe_entropy_per_layer", None)
+
                 loss = self.loss_fn(pred, labels)
                 if aux_loss is not None:
                     loss += aux_loss / self.gradient_accumulation_steps
