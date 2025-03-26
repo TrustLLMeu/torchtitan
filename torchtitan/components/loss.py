@@ -9,7 +9,7 @@ from typing import Callable, TypeAlias
 import torch
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.models.inputs import MTPInputsDict, TransformerInputsDict
+from torchtitan.models.inputs import MoEInputsDict, MTPInputsDict, TransformerInputsDict
 from torchtitan.tools.logging import logger
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
@@ -62,3 +62,17 @@ def multi_token_cross_entropy_loss(
         loss = loss / job_config.training.num_mtp_tokens
         mtp_loss = mtp_loss + loss
     return main_loss + mtp_loss * job_config.training.mtp_loss_weight
+
+
+def moe_loss(
+        pred: MoEInputsDict,
+        labels: torch.Tensor,
+        loss_fn: LossFunction,
+) -> torch.Tensor:
+    """Sequence-wise auxiliary loss-enhanced loss function for MoE Transformer
+    model training.
+    """
+    assert isinstance(pred, dict)
+    loss = loss_fn(pred, labels)
+    loss += pred["aux_loss"]
+    return loss
