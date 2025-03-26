@@ -212,6 +212,12 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
+    dataset_num_workers: int = 0
+    """Number of data loader workers"""
+
+    dataset_pin_memory: bool = False
+    """Whether to use memory pinning in the data loader"""
+
     dataset_inner_name: str | None = None
     """Dataset name to use (`name` argument of `datasets.load_dataset`)"""
 
@@ -894,6 +900,12 @@ class Validation:
 
     dataset_path: str | None = None
     """Path to dataset to use for validation"""
+
+    dataset_num_workers: int = 0
+    """Number of validation data loader workers"""
+
+    dataset_pin_memory: bool = False
+    """Whether to use memory pinning in the validation data loader"""
 
     dataset_inner_name: str | None = None
     """Dataset name to use for validation (`name` argument of `datasets.load_dataset`)"""

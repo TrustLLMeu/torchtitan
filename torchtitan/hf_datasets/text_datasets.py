@@ -297,11 +297,17 @@ def build_text_dataloader(
         dataset_key=dataset_key,
     )
 
+    rng = torch.Generator()
+    if job_config.training.seed is not None:
+        rng.manual_seed(job_config.training.seed)
     return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=job_config.training.dataset_num_workers,
+        pin_memory=job_config.training.dataset_pin_memory,
+        generator=rng,
     )
 
 
@@ -343,4 +349,6 @@ def build_text_validation_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=job_config.validation.dataset_num_workers,
+        pin_memory=job_config.validation.dataset_pin_memory,
     )
