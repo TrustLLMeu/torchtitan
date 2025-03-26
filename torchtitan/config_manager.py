@@ -338,6 +338,17 @@ class JobConfig:
                 loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
+            "--training.dataset_num_workers",
+            type=int,
+            default=0,
+            help="Number of data loader workers",
+        )
+        self.parser.add_argument(
+            "--training.dataset_pin_memory",
+            action="store_true",
+            help="Whether to use memory pinning in the data loader",
+        )
+        self.parser.add_argument(
             "--training.dataset_inner_name", type=str, help="Dataset name to use"
         )
         self.parser.add_argument(
