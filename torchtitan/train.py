@@ -19,13 +19,14 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import cross_entropy_loss, moe_loss, multi_token_cross_entropy_loss
+from torchtitan.components.loss import cross_entropy_loss, multi_token_cross_entropy_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.models.MoEllama.loss import moe_loss
 from torchtitan.models.MoEllama.moellama import Transformer as MoETransformer
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils

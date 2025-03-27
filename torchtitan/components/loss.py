@@ -10,7 +10,6 @@ import torch
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.models.llama.model import MTPInputs, TransformerInputs
-from torchtitan.models.MoEllama.moellama import MoEInputs
 
 
 def cross_entropy_loss(
@@ -29,20 +28,6 @@ def cross_entropy_loss(
 
 # TODO: compiling loss function causes CUDA errors, turning off for now
 # compiled_cross_entropy_loss = torch.compile(cross_entropy_loss)
-
-
-def moe_loss(
-        pred: MoEInputs,
-        labels: torch.Tensor,
-        loss_fn: Callable,
-) -> torch.Tensor:
-    """Sequence-wise auxiliary loss-enhanced loss function for MoE Transformer
-    model training.
-    """
-    assert isinstance(pred, dict)
-    loss = loss_fn(pred, labels)
-    loss += pred["aux_loss"]
-    return loss
 
 
 def multi_token_cross_entropy_loss(
