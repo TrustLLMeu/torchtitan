@@ -410,16 +410,15 @@ def build_hf_dataloader(
     if len(dataset_name) > 1:
         assert dataset_files is None, \
             "cannot supply dataset files when using multiple datasets"
-    assert all(
-        len(d) == len(dataset_name)
-        for d in [
-                dataset_path,
-                dataset_inner_name,
-                dataset_split,
-                dataset_key,
-                dataset_weights,
-        ]
-    )
+    for d in [
+            dataset_path,
+            dataset_inner_name,
+            dataset_split,
+            dataset_key,
+            dataset_weights,
+    ]:
+        assert len(d) == normed_list_length, \
+            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
     hf_datasets = []
     for (d_name, d_path, d_inner_name, d_split, d_key) in zip(
             dataset_name,
