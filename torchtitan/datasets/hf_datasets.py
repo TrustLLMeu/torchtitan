@@ -371,8 +371,12 @@ class GreedyPackedDataset(IterableDataset, Stateful):
         }
 
 
-def _normalize_none_list(xs, length):
-    return [None] * length if xs is None else xs
+def _normalize_list(xs: list, length: int, duplicate: bool = False):
+    if xs is None:
+        return [None] * length
+    elif duplicate and len(xs) == 1:
+        return [xs[0] for _ in range(length)]
+    return xs
 
 
 def build_hf_dataloader(
@@ -397,10 +401,10 @@ def build_hf_dataloader(
     dataset_key = job_config.training.dataset_key
 
     normed_list_length = len(dataset_name)
-    dataset_path = _normalize_none_list(dataset_path, normed_list_length)
-    dataset_inner_name = _normalize_none_list(dataset_inner_name, normed_list_length)
-    dataset_split = _normalize_none_list(dataset_split, normed_list_length)
-    dataset_key = _normalize_none_list(dataset_key, normed_list_length)
+    dataset_path = _normalize_list(dataset_path, normed_list_length)
+    dataset_inner_name = _normalize_list(dataset_inner_name, normed_list_length)
+    dataset_split = _normalize_list(dataset_split, normed_list_length, duplicate=True)
+    dataset_key = _normalize_list(dataset_key, normed_list_length, duplicate=True)
     dataset_weights = [1.0] * normed_list_length if dataset_weights is None else dataset_weights
 
     if len(dataset_name) > 1:
