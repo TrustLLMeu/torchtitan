@@ -401,7 +401,7 @@ def build_hf_dataloader(
     dataset_inner_name = _normalize_none_list(dataset_inner_name, normed_list_length)
     dataset_split = _normalize_none_list(dataset_split, normed_list_length)
     dataset_key = _normalize_none_list(dataset_key, normed_list_length)
-    dataset_weights = [1] * normed_list_length if dataset_weights is None else dataset_weights
+    dataset_weights = [1.0] * normed_list_length if dataset_weights is None else dataset_weights
 
     if len(dataset_name) > 1:
         assert dataset_files is None, \
