@@ -372,6 +372,14 @@ class GreedyPackedDataset(IterableDataset, Stateful):
         }
 
 
+def _normalize_list(xs: list, length: int, duplicate: bool = False):
+    if xs is None:
+        return [None] * length
+    elif duplicate and len(xs) == 1:
+        return [xs[0] for _ in range(length)]
+    return xs
+
+
 def build_hf_dataloader(
     dp_world_size: int,
     dp_rank: int,
@@ -385,32 +393,78 @@ def build_hf_dataloader(
     batch_size = job_config.training.batch_size
     seq_len = job_config.training.seq_len
     num_mtp_tokens = job_config.training.num_mtp_tokens
+    dataset_weights = job_config.training.dataset_weights
+    dataset_mix_in_seq = job_config.training.dataset_mix_in_seq
     dataset_inner_name = job_config.training.dataset_inner_name
     dataset_split = job_config.training.dataset_split
     dataset_files = job_config.training.dataset_files
     dataset_streaming = job_config.training.dataset_streaming
     dataset_key = job_config.training.dataset_key
 
-    hf_ds = HuggingFaceDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-        dataset_inner_name=dataset_inner_name,
-        dataset_files=dataset_files,
-        dataset_split=dataset_split,
-        dataset_streaming=dataset_streaming,
-        dataset_key=dataset_key,
+    normed_list_length = len(dataset_name)
+    dataset_path = _normalize_list(dataset_path, normed_list_length)
+    dataset_inner_name = _normalize_list(dataset_inner_name, normed_list_length)
+    dataset_split = _normalize_list(dataset_split, normed_list_length)
+    dataset_key = _normalize_list(dataset_key, normed_list_length)
+    dataset_weights = (
+        [1.0] * normed_list_length
+        if dataset_weights is None
+        # Convert to floats.
+        else list(map(float, dataset_weights))
     )
 
-    hf_ds = GreedyPackedDataset(
-        dataset=hf_ds,
-        seq_len=seq_len,
-        infinite=infinite,
-        num_mtp_tokens=num_mtp_tokens,
-    )
+    if len(dataset_name) > 1:
+        assert dataset_files is None, \
+            "cannot supply dataset files when using multiple datasets"
+    for d in [
+            dataset_path,
+            dataset_inner_name,
+            dataset_split,
+            dataset_key,
+            dataset_weights,
+    ]:
+        assert len(d) == normed_list_length, \
+            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+    hf_datasets = []
+    for (d_name, d_path, d_inner_name, d_split, d_key) in zip(
+            dataset_name,
+            dataset_path,
+            dataset_inner_name,
+            dataset_split,
+            dataset_key,
+    ):
+        hf_ds = HuggingFaceDataset(
+            dataset_name=d_name,
+            dataset_path=d_path,
+            tokenizer=tokenizer,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            dataset_inner_name=d_inner_name,
+            dataset_files=dataset_files,
+            dataset_split=d_split,
+            dataset_streaming=dataset_streaming,
+            dataset_key=d_key,
+        )
+        if not dataset_mix_in_seq:
+            hf_ds = GreedyPackedDataset(
+                dataset=hf_ds,
+                seq_len=seq_len,
+                infinite=infinite,
+                num_mtp_tokens=num_mtp_tokens,
+            )
+        hf_datasets.append(hf_ds)
+
+    # First pack, then mix → data is only mixed in batch dimension.
+    # First mix, then pack → data is also mixed inside packed sample.
+    hf_ds = MixedDataset(hf_datasets, dataset_weights)
+    if dataset_mix_in_seq:
+        hf_ds = GreedyPackedDataset(
+            dataset=hf_ds,
+            seq_len=seq_len,
+            infinite=infinite,
+            num_mtp_tokens=num_mtp_tokens,
+        )
 
     rng = torch.Generator()
     rng.manual_seed(job_config.training.seed)
