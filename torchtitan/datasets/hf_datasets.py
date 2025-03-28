@@ -403,9 +403,14 @@ def build_hf_dataloader(
     normed_list_length = len(dataset_name)
     dataset_path = _normalize_list(dataset_path, normed_list_length)
     dataset_inner_name = _normalize_list(dataset_inner_name, normed_list_length)
-    dataset_split = _normalize_list(dataset_split, normed_list_length, duplicate=True)
-    dataset_key = _normalize_list(dataset_key, normed_list_length, duplicate=True)
-    dataset_weights = [1.0] * normed_list_length if dataset_weights is None else dataset_weights
+    dataset_split = _normalize_list(dataset_split, normed_list_length)
+    dataset_key = _normalize_list(dataset_key, normed_list_length)
+    dataset_weights = (
+        [1.0] * normed_list_length
+        if dataset_weights is None
+        # Convert to floats.
+        else list(map(float, dataset_weights))
+    )
 
     if len(dataset_name) > 1:
         assert dataset_files is None, \
