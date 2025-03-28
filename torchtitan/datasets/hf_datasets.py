@@ -230,7 +230,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 class MixedDataset(IterableDataset, Stateful):
     def __init__(self, datasets: list[IterableDataset], weights: Optional[list[float]]):
         self.datasets = datasets
-        self.weights = [1] * len(self.datasets) if weights is None else weights
+        self.weights = [1.0] * len(self.datasets) if weights is None else weights
 
         self.num_sampled_per_dataset = [0] * len(self.datasets)
         self._dataset_indices = list(range(len(self.datasets)))
