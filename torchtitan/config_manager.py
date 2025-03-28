@@ -309,11 +309,11 @@ class JobConfig:
 
         # training configs
         self.parser.add_argument(
-            "--training.dataset", type=str, default="c4_test", help="Dataset to use"
+            "--training.dataset", type=string_list, default=["c4_test"], help="Dataset to use"
         )
         self.parser.add_argument(
             "--training.dataset_path",
-            type=str,
+            type=string_list,
             help="""
                 Path to the dataset in the file system. If provided, data will be
                 loaded from this path instead of downloaded.""",
@@ -330,7 +330,22 @@ class JobConfig:
             help="Whether to use memory pinning in the data loader",
         )
         self.parser.add_argument(
-            "--training.dataset_inner_name", type=str, help="Dataset name to use"
+            "--training.dataset_weights",
+            type=string_list,
+            nargs="*",
+            help="""
+                Probability of sampling from each dataset, separated by commas.
+                If not given, sample uniformly.""",
+        )
+        self.parser.add_argument(
+            "--training.dataset_mix_in_seq",
+            action="store_true",
+            help="""
+                Whether to also mix datasets in the sequence dimension during
+                packing. If not given, only mix in batch dimenison.""",
+        )
+        self.parser.add_argument(
+            "--training.dataset_inner_name", type=string_list, help="Dataset name to use"
         )
         self.parser.add_argument(
             "--training.dataset_files",
@@ -339,7 +354,10 @@ class JobConfig:
             help="Dataset files to use (only necessary for certain types of datasets)",
         )
         self.parser.add_argument(
-            "--training.dataset_split", type=str, default="train", help="Dataset split to use"
+            "--training.dataset_split",
+            type=string_list,
+            default=["train"],
+            help="Dataset split to use",
         )
         self.parser.add_argument(
             "--training.dataset_streaming",
@@ -348,8 +366,8 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.dataset_key",
-            type=str,
-            default="text",
+            type=string_list,
+            default=["text"],
             help="Key to use for extracting the relevant text data from the dataset's samples",
         )
         self.parser.add_argument(
