@@ -15,6 +15,7 @@ from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
+import torch.utils.data.datapipes as dp
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import Tokenizer
@@ -465,6 +466,12 @@ def build_hf_dataloader(
 
     if job_config.training.dataset_seed is None:
         job_config.training.dataset_seed = job_config.training.seed
+
+    if job_config.training.dataset_shuffle_buffer_size:
+        hf_ds = dp.iter.IterableWrapper(hf_ds)
+        hf_ds = dp.iter.Shuffler(hf_ds)
+        if job_config.training.dataset_seed is not None:
+            hf_ds.set_seed(job_config.training.dataset_seed)
 
     rng = torch.Generator()
     if job_config.training.dataset_seed is not None:

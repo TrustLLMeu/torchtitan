@@ -349,6 +349,12 @@ class JobConfig:
             help="Whether to use memory pinning in the data loader",
         )
         self.parser.add_argument(
+            "--training.dataset_shuffle_buffer_size",
+            type=int,
+            default=0,
+            help="Buffer size of windowed shuffling buffer. 0 means no shuffling (the default).",
+        )
+        self.parser.add_argument(
             "--training.dataset_seed",
             type=int,
             default=None,
