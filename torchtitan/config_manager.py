@@ -634,6 +634,20 @@ class JobConfig:
             """,
         )
 
+        self.parser.add_argument(
+            "--parallelism.expert_parallel_degree",
+            type=int,
+            default=1,
+            help="Expert Parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
+            "--parallelism.expert_parallel_mode",
+            type=str,
+            default="none",
+            choices=["naive_dp2ep", "none"],
+            help="Expert Parallelism mode.",
+        )
+
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",

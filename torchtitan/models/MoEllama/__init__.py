@@ -24,9 +24,9 @@ moe_llama3_configs = {
         n_layers=8,
         n_heads=16,
         rope_theta=500000,
-        shared_experts=1,
-        n_routed_experts=4,
-        activate_experts=1,
+        n_shared_experts=1,
+        activate_experts=8,
+        n_routed_experts=64,
     ),
     "1B-7B": MoEModelArgs(
         dim=2048,

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-from functools import partial
 import math
-from typing import Optional
+from typing import Optional, Callable
 
 from einops import rearrange
 import torch
@@ -171,8 +170,9 @@ class Gate(nn.Module):
             x: Input tensor of shape (B*S, D)
             update_bias: Whether to accumulate bias adjustments (only during training)
         Returns:
-            weights: Normalized routing weights (B*S, K)
-            indices: Selected expert indices (B*S, K)
+            weights: Normalized routing weights
+            indices: Selected expert indices
+            scores: Expert selection scores
         """
         # Compute expert selection scores (sigmoid-based gating)
         scores = x @ self.expert_embeddings.T
@@ -248,7 +248,7 @@ class MoE(nn.Module):
         self,
         dim: int,
         multiple_of: int = 256,
-        shared_experts: int = 2,
+        n_shared_experts: int = 2,
         n_routed_experts: int = 8,
         activate_experts: int = 2,
         ffn_dim_multiplier: Optional[float] = None,
@@ -265,28 +265,24 @@ class MoE(nn.Module):
         Saying the dense model have the 'hidden_size' of 1024,
         Then "actual_dim * activate_experts = hidden_size" should be satisfied.
         """
-        assert (
-            shared_experts > 0
-        ), "when moved from my libs to this one, something goes wrong for shared_experts=0"
+
         if match_dim_with_dense:
-            total_activate_experts = shared_experts + activate_experts
-            ratio = total_activate_experts / (n_routed_experts + shared_experts)
+            total_activate_experts = n_shared_experts + activate_experts
+            ratio = total_activate_experts / (n_routed_experts + n_shared_experts)
         else:
             ratio = 1.0
-        hidden_dim = 4 * dim
-        hidden_dim = int(2 * hidden_dim / 3 * ratio)
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim * 1.0)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        mlp_func = partial(
-            FeedForward,
-            dim=dim,
-            hidden_dim=hidden_dim,
-        )
+        hidden_dim = 4 * dim
+        hidden_dim = int(2 * hidden_dim / 3)
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = int(hidden_dim * ratio)
+
+        hidden_dim += -hidden_dim % multiple_of
+
         self.n_routed_experts = n_routed_experts
         self.topk = activate_experts
-        self.shared_experts = shared_experts
+        self.n_shared_experts = n_shared_experts
         self.aux_loss_alpha = aux_loss_alpha  # Loss coefficient
 
         # Use updated Gate with DeepSeekMoE-style routing and bias balancing
@@ -318,8 +314,8 @@ class MoE(nn.Module):
             self.experts = None
 
     def init_weights(self, init_std: float):
-        for expert in self.experts:
-            expert.init_weights(init_std)
+        if self.experts is not None:
+            self.experts.init_weights(init_std)
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
         self.gate.init_weights()
@@ -328,7 +324,7 @@ class MoE(nn.Module):
         self.gate.update()
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        B, S, D = x.size()
+        bz, slen, dim = x.shape
         x = rearrange(x, "b s d -> (b s) d")  # Flatten batch & sequence
         out = torch.zeros_like(x)
 
@@ -382,11 +378,12 @@ class MoE(nn.Module):
         else:
             aux_loss = torch.tensor(0.0, device=x.device)
 
-        routing_entropy = -(weights * weights.log()).sum(dim=-1).mean()
+        if self.topk > 0:
+            routing_entropy = -(weights * weights.log()).sum(dim=-1).mean()
+        else:
+            routing_entropy = torch.tensor(0.0, device=x.device)
 
-        output = rearrange(
-            shared_outputs + routed_outputs, "(b s) d -> b s d", b=B, s=S
-        )
+        output = rearrange(out, "(b s) d -> b s d", b=bz, s=slen)
         return output, aux_loss, routing_entropy
 
     def sequence_wise_aux_loss(
@@ -478,7 +475,7 @@ class TransformerBlock(nn.Module):
             dim=model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-            shared_experts=model_args.shared_experts,
+            n_shared_experts=model_args.n_shared_experts,
             n_routed_experts=model_args.n_routed_experts,
             activate_experts=model_args.activate_experts,
             use_bias_for_routing=model_args.moe_gate_use_bias_for_routing,
@@ -567,6 +564,10 @@ class Transformer(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+
+        print(
+            f"model_args.dim = {model_args.dim} | model_args.vocab_size = {model_args.vocab_size}"
+        )
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
