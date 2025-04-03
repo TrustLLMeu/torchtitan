@@ -349,6 +349,14 @@ class JobConfig:
             help="Whether to use memory pinning in the data loader",
         )
         self.parser.add_argument(
+            "--training.dataset_seed",
+            type=int,
+            default=None,
+            help="""
+                Choose the base RNG seed used for data shuffling. By default,
+                use the same as `training.seed`.""",
+        )
+        self.parser.add_argument(
             "--training.dataset_weights",
             type=string_list,
             nargs="*",
