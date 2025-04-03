@@ -139,7 +139,10 @@ def get_train_context(
     enable_loss_parallel: bool, enable_compiled_autograd: bool
 ) -> Generator[None, None, None]:
     @contextlib.contextmanager
-    def context(cp_context: Generator[None, None, None] | None = None):
+    def context(
+        cp_context: Generator[None, None, None] | None = None,
+        activations_handling_ctx: contextlib.AbstractContextManager | None = None,
+    ):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
@@ -162,6 +165,9 @@ def get_train_context(
                     )
                 )
                 stack.enter_context(cp_context)
+
+            if activations_handling_ctx is not None:
+                stack.enter_context(activations_handling_ctx)
 
             yield
 

@@ -23,6 +23,7 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
+from torchtitan.components.activation_offload import get_act_offloading_ctx_manager
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.MoEllama.moellama import Transformer as MoETransformer
@@ -357,6 +358,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ft_manager=ft_manager,
         )
 
+        self.activations_handling_ctx = get_act_offloading_ctx_manager(
+            self.model_parts[0], enable_activation_offloading=False
+        )
+
         self.train_context = dist_utils.get_train_context(
             parallel_dims.loss_parallel_enabled,
             parallelism_config.enable_compiled_autograd,
@@ -414,7 +419,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context(optional_context_parallel_ctx, self.activations_handling_ctx):
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
