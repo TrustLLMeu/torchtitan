@@ -192,9 +192,6 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # Variables for checkpointing
         self._sample_idx = 0
 
-    def __len__(self):
-        return len(self._data)
-
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
