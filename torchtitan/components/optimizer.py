@@ -19,8 +19,7 @@ from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
-
-from optimizers import DistributedMuon, DistributedMuonV2, Muon
+from torchtitan.optimizers import DistributedMuon, DistributedMuonV2, Muon, Scion
 
 __all__ = [
     "OptimizersContainer",
@@ -103,7 +102,8 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
 
     def zero_grad(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
-            optimizer.zero_grad(*args, **kwargs)
+            if not (isinstance(optimizer, Scion) and optimizer.is_light):
+                optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> dict[str, Any]:
         func = functools.partial(
@@ -281,20 +281,41 @@ def build_optimizers(
     eps = job_config.optimizer.eps
     weight_decay = job_config.optimizer.weight_decay
 
-    optim_implementation = job_config.optimizer.implementation
-    assert optim_implementation in ["fused", "foreach", "for-loop"]
+    if name in ["Adam", "AdamW", "Muon", "DistributedMuon", "DistributedMuonV2"]:
+        optim_implementation = job_config.optimizer.implementation
+        assert optim_implementation in ["fused", "foreach", "for-loop"]
 
-    fused = optim_implementation == "fused"
-    foreach = optim_implementation == "foreach"
+        fused = optim_implementation == "fused"
+        foreach = optim_implementation == "foreach"
 
-    optimizer_kwargs = {
-        "lr": lr,
-        "eps": eps,
-        "betas": (0.9, 0.95),
-        "weight_decay": weight_decay,
-        "fused": fused,
-        "foreach": foreach,
-    }
+        optimizer_kwargs = {
+            "lr": lr,
+            "eps": eps,
+            "betas": (0.9, 0.95),
+            "weight_decay": weight_decay,
+            "fused": fused,
+            "foreach": foreach,
+        }
+    elif name == "Scion":
+        backend_steps = job_config.optimizer.backend_steps
+        momentum = job_config.optimizer.momentum
+        nesterov = job_config.optimizer.nesterov
+        is_light = job_config.optimizer.is_light
+        is_unconstrained = job_config.optimizer.is_unconstrained
+
+        optimizer_kwargs = {
+            "is_light": is_light,
+            "is_unconstrained": is_unconstrained,
+            "lr": lr,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "eps": eps,
+            "norm_factor": "spectral",
+            "backend": "newtonschulz5",
+            "backend_steps": backend_steps,
+        }
+    else:
+        raise NotImplementedError(f"Optimizer {name} not added.")
 
     optimizer_kwargs["extra_kwargs"] = extra_kwargs
 
@@ -304,6 +325,7 @@ def build_optimizers(
         "Muon": Muon,
         "DistributedMuon": DistributedMuon,
         "DistributedMuonV2": DistributedMuonV2,
+        "Scion": Scion,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
