@@ -197,6 +197,31 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+class KVCache(nn.Module):
+    def __init__(self, batch_size, seq_length, n_kv_heads, head_dim, dtype, device):
+        super().__init__()
+        cache_shape = (batch_size, seq_length, n_kv_heads, head_dim)
+        self.register_buffer(
+            "cache_k",
+            torch.zeros(cache_shape, dtype=dtype, device=device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cache_v",
+            torch.zeros(cache_shape, dtype=dtype, device=device),
+            persistent=False,
+        )
+
+    def update(self, start_pos, xk, xv):
+        assert start_pos >= 0
+        bsz, seqlen, _ = xk.shape
+        self.cache_k[:bsz, start_pos:start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos:start_pos + seqlen] = xv
+        xk = self.cache_k[:bsz, :start_pos + seqlen]
+        xv = self.cache_v[:bsz, :start_pos + seqlen]
+        return xk, xv
+
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -237,6 +262,8 @@ class Attention(nn.Module):
         )
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
+        self._kv_cache: Optional[KVCache] = None
+
         self.qk_norm = model_args.qk_norm
         if self.qk_norm:
             self.q_norm = build_norm(
@@ -255,10 +282,23 @@ class Attention(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        dtype = self.wk.weight.dtype
+        device = self.wk.weight.device
+        self._kv_cache = KVCache(
+            batch_size=max_batch_size,
+            seq_length=max_seq_length,
+            n_kv_heads=self.n_kv_heads,
+            head_dim=self.head_dim,
+            dtype=dtype,
+            device=device,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        start_pos: int = -1,
     ):
         """
         Forward pass of the attention module.
@@ -288,6 +328,9 @@ class Attention(nn.Module):
             xk = self.k_norm(xk)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+        if self._kv_cache is not None and start_pos >= 0:
+            xk, xv = self._kv_cache.update(start_pos, xk, xv)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -424,6 +467,9 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         self.feed_forward.init_weights(self.weight_init_std)
+
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        self.attention.init_kv_cache(max_batch_size, max_seq_length)
 
 
 class MTPModule(nn.Module):
@@ -595,6 +641,15 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
         )
+
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_kv_cache(max_batch_size, max_seq_length)
+        if self.model_args.num_mtp_modules > 0:
+            for layer in self.mtp_layers.values():
+                if layer is not None:
+                    layer.init_kv_cache(max_batch_size, max_seq_length)
 
     def forward(self, inputs: MTPInputs) -> MTPInputsDict:
         """
