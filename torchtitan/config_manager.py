@@ -172,6 +172,23 @@ class JobConfig:
             action="store_true",
             help="Whether to log metrics to Weights & Biases",
         )
+        self.parser.add_argument(
+            "--metrics.wandb_project",
+            type=str,
+            help="""
+                Weights & Biases project name. Use "torchtitan" if neither this is given
+                nor the `WANDB_PROJECT` environment variable set.""",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_group",
+            type=str,
+            help="Weights & Biases group name",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_name",
+            type=str,
+            help="Weights & Biases run name",
+        )
 
         # model configs
         self.parser.add_argument(
