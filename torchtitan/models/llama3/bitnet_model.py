@@ -159,7 +159,7 @@ class BitNetTransformerBlock(TransformerBlock):
     feed_forward_cls = BitNetFeedForward
 
     def __init__(self, layer_id: int, model_args: TransformerModelArgs):
-        assert model_args.norm_type.lower() == "rmsnorm", "BitNet assumes RMSNorm"
+        assert model_args.norm_type.lower() in ["rmsnorm", "np_rmsnorm"], "BitNet assumes RMSNorm"
 
         self._init_feed_forward_builder(model_args)
         super().__init__(layer_id, model_args)
@@ -207,5 +207,5 @@ class BitNetTransformer(Transformer):
     transformer_block_cls = BitNetTransformerBlock
 
     def __init__(self, model_args: TransformerModelArgs):
-        assert model_args.norm_type.lower() == "rmsnorm", "BitNet assumes RMSNorm"
+        assert model_args.norm_type.lower() in ["rmsnorm", "np_rmsnorm"], "BitNet assumes RMSNorm"
         super().__init__(model_args)

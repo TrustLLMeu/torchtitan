@@ -207,8 +207,10 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            choices=["layernorm", "np_layernorm", "rmsnorm"],
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm]",
+            choices=["layernorm", "np_layernorm", "rmsnorm", "np_rmsnorm"],
+            help="""
+                Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, np_rmsnorm]
+            """,
         )
         self.parser.add_argument(
             "--model.use_flex_attn",
