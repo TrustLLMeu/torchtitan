@@ -115,7 +115,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 enable_loss_parallel=not parallelism_config.disable_loss_parallel,
                 ft_manager=ft_manager,
             )
-        dist_utils.init_distributed(job_config)
+        dist_utils.init_distributed(job_config, self.device)
 
         # build meshes
         self.world_mesh = world_mesh = parallel_dims.build_mesh(device_type=device_type)
