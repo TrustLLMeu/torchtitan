@@ -511,6 +511,14 @@ def build_optimizers(
         foreach = optim_implementation == "foreach"
 
         width_multiplier = job_config.model.mup_width_multiplier
+        # TODO Remove this deprecation handling at some point. Added on 2025-04-10.
+        if "-multiplier-" in job_config.model.flavor:
+            flavor_multiplier = int(job_config.model.flavor.split("-multiplier-")[-1])
+            assert width_multiplier == flavor_multiplier, (
+                "`--model.mup_width_multiplier` does not match multiplier specified in flavor. "
+                "Please set `--model.mup_width_multiplier` to the μP multiplier; "
+                "flavor parsing has been deprecated and this check will be removed in the future."
+            )
 
         optimizer_kwargs = {
             "lr": lr / width_multiplier,
