@@ -18,6 +18,7 @@ from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.inits import build_init_fn
 from torchtitan.models.inputs import MTPInputs, MTPInputsDict
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
@@ -40,6 +41,23 @@ class TransformerModelArgs(BaseModelArgs):
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
+    first_in_init_fn_type: str = "normal"
+    first_in_init_std: float = 1.0
+    # Exponent applied to the first input layer's input dimensionality
+    # to obtain its init std factor.
+    first_in_exp: float = 0.0
+    intermediate_init_fn_type: str = "trunc_normal"
+    intermediate_init_std: float = 0.02
+    # Exponent applied to the model's hidden dimensionality to obtain
+    # intermediate layers' init std factors.
+    intermediate_exp: float = 0.0
+    # Whether to initialize the GLU gate as if it was a residual layer.
+    init_gate_as_residual: bool = True
+    final_out_init_fn_type: str = "trunc_normal"
+    final_out_init_std: float = 1.0
+    # Exponent applied to the final output layer's input dimensionality
+    # to obtain its init std factor.
+    final_out_exp: float = -0.5
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
 
@@ -277,10 +295,11 @@ class Attention(nn.Module):
                 eps=model_args.norm_eps,
             )
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, init_std: float, residual_div: float, init_fn_type: str):
+        init_fn = build_init_fn(init_fn_type)
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            init_fn(linear.weight, mean=0.0, std=init_std)
+        init_fn(self.wo.weight, mean=0.0, std=init_std / residual_div)
 
     def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
         dtype = self.wk.weight.dtype
@@ -387,10 +406,22 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+    def init_weights(
+            self,
+            init_std: float,
+            residual_div: float,
+            init_gate_as_residual: bool,
+            init_fn_type: str,
+    ):
+        init_fn = build_init_fn(init_fn_type)
+        init_fn(self.w1.weight, mean=0.0, std=init_std)
+        init_fn(self.w2.weight, mean=0.0, std=init_std / residual_div)
+        gate_init_std = (
+            init_std / residual_div
+            if init_gate_as_residual
+            else init_std
+        )
+        init_fn(self.w3.weight, mean=0.0, std=gate_init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -437,10 +468,16 @@ class TransformerBlock(nn.Module):
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
+        self.weight_init_fn_type = model_args.intermediate_init_fn_type
+        self.weight_init_std = (
+            model_args.intermediate_init_std
+            * model_args.dim ** model_args.intermediate_exp
+        )
         if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
+            self.residual_div = (2 * (self.layer_id + 1)) ** 0.5
         else:
-            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+            self.residual_div = (2 * self.num_layers) ** 0.5
+        self.init_gate_as_residual = model_args.init_gate_as_residual
 
     def forward(
         self,
@@ -465,8 +502,17 @@ class TransformerBlock(nn.Module):
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.attention.init_weights(
+            self.weight_init_std,
+            residual_div=self.residual_div,
+            init_fn_type=self.weight_init_fn_type,
+        )
+        self.feed_forward.init_weights(
+            self.weight_init_std,
+            residual_div=self.residual_div,
+            init_gate_as_residual=self.init_gate_as_residual,
+            init_fn_type=self.weight_init_fn_type,
+        )
 
     def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
         self.attention.init_kv_cache(max_batch_size, max_seq_length)
@@ -496,8 +542,9 @@ class MTPModule(nn.Module):
 
     def init_weights(self):
         self.in_norm.reset_parameters()
+        init_fn = build_init_fn(self.parent_transformer.model_args.intermediate_init_fn_type)
         # Re-use block's init std.
-        self.mtp_proj.init_weights(self.block.weight_init_std)
+        init_fn(self.mtp_proj.weight, mean=0.0, std=self.block.weight_init_std)
         self.block.init_weights()
 
     def forward(self, tokens: torch.Tensor, prev_embed: torch.Tensor):
@@ -610,22 +657,38 @@ class Transformer(nn.Module, ModelProtocol):
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
             self.freqs_cis = self._precompute_freqs_cis()
+        first_in_init_fn = build_init_fn(self.model_args.first_in_init_fn_type)
+        first_in_std = (
+            self.model_args.first_in_init_std
+            * self.model_args.vocab_size ** self.model_args.first_in_exp
+        )
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            first_in_init_fn(
+                self.tok_embeddings.weight,
+                mean=0.0,
+                std=first_in_std,
+            )
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_init_fn = build_init_fn(self.model_args.final_out_init_fn_type)
+        final_out_std = (
+            self.model_args.final_out_init_std
+            * self.model_args.dim ** self.model_args.final_out_exp
+        )
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            extra_kwargs = {}
+            if self.model_args.final_out_init_fn_type == "trunc_normal":
+                extra_kwargs["a"] = -cutoff_factor * final_out_std
+                extra_kwargs["b"] = cutoff_factor * final_out_std
+            final_out_init_fn(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
+                **extra_kwargs,
             )
         if self.model_args.num_mtp_modules > 0:
             for layer in self.mtp_layers.values():

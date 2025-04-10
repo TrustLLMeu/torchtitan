@@ -5,6 +5,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from . import ep_comm
+from torchtitan.models.inits import build_init_fn
 
 
 class GroupedExperts(nn.Module):
@@ -92,7 +93,19 @@ class GroupedExperts(nn.Module):
 
         return out
 
-    def init_weights(self, init_std: float):
+    def init_weights(
+            self,
+            init_std: float,
+            residual_div: float,
+            init_gate_as_residual: bool,
+            init_fn_type: str,
+    ):
+        init_fn = build_init_fn(init_fn_type)
+        gate_init_std = (
+            init_std / residual_div
+            if init_gate_as_residual
+            else init_std
+        )
 
         def init_each_expert(w, init_std):
             if isinstance(w, torch.distributed.tensor.DTensor):
@@ -102,12 +115,12 @@ class GroupedExperts(nn.Module):
 
             # Initialize the local tensor
             for e in range(local_tensor.shape[0]):
-                nn.init.trunc_normal_(local_tensor[e], mean=0.0, std=init_std)
+                init_fn(local_tensor[e], mean=0.0, std=init_std)
             if isinstance(w, torch.distributed.tensor.DTensor):
                 w.to_local().data = local_tensor
             else:
                 w.copy_(local_tensor)
 
-        init_each_expert(self.gate_proj.data, 0.02)
-        init_each_expert(self.down_proj.data, init_std)
-        init_each_expert(self.up_proj.data, init_std)
+        init_each_expert(self.gate_proj.data, init_std)
+        init_each_expert(self.down_proj.data, gate_init_std)
+        init_each_expert(self.up_proj.data, init_std / residual_div)

@@ -5,6 +5,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from . import ep_comm
+from torchtitan.models.inits import build_init_fn
 
 
 class SeparateParamsGroupedExperts(nn.Module):
@@ -105,8 +106,21 @@ class SeparateParamsGroupedExperts(nn.Module):
 
         return out
 
-    def init_weights(self, init_std: float):
+    def init_weights(
+            self,
+            init_std: float,
+            residual_div: float,
+            init_gate_as_residual: bool,
+            init_fn_type: str,
+    ):
+        init_fn = build_init_fn(init_fn_type)
+        gate_init_std = (
+            init_std / residual_div
+            if init_gate_as_residual
+            else init_std
+        )
+
         for expert_idx in range(self.num_experts):
-            nn.init.trunc_normal_(self.gate_proj[expert_idx], 0.02)
-            nn.init.trunc_normal_(self.down_proj[expert_idx], init_std)
-            nn.init.trunc_normal_(self.up_proj[expert_idx], init_std)
+            init_fn(self.gate_proj[expert_idx], mean=0.0, std=init_std)
+            init_fn(self.down_proj[expert_idx], mean=0.0, std=gate_init_std)
+            init_fn(self.up_proj[expert_idx], mean=0.0, std=init_std / residual_div)
