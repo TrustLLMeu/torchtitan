@@ -141,6 +141,12 @@ class JobConfig:
             help="How often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
+            "--metrics.log_norm_freq",
+            type=int,
+            default=0,
+            help="How often to log parameter norm metrics to TensorBoard, in iterations",
+        )
+        self.parser.add_argument(
             "--metrics.enable_tensorboard",
             action="store_true",
             help="Whether to log metrics to TensorBoard",
