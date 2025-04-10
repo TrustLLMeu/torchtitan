@@ -212,6 +212,14 @@ class JobConfig:
             help="Which model config to train",
         )
         self.parser.add_argument(
+            "--model.mup_width_multiplier",
+            type=int,
+            default=1,
+            help="""
+                Width multiplier for the model to apply μP scaling (only used
+                for Adam/Muon-based optimizers).""",
+        )
+        self.parser.add_argument(
             "--model.first_in_init_fn_type",
             type=str,
             default="normal",
