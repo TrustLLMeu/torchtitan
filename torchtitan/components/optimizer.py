@@ -168,17 +168,15 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
                     else None
                 )
 
-            # for muon, we need to pass model as well
-
-            is_muon = issubclass(optimizer_cls, (Muon, DistributedMuon, DistributedMuonV2))
             extra_kwargs = kwargs.pop("extra_kwargs")
-
             params = _extract_param_groups(model, kwargs)
+
+            # For Muon, we need to pass the model as well
+            is_muon = issubclass(optimizer_cls, (Muon, DistributedMuon, DistributedMuonV2))
             if is_muon:
+                extra_kwargs.setdefault("model", model)
                 kwargs.update(extra_kwargs)
-                self.optimizers.append(optimizer_cls(params, model, **kwargs))
-            else:
-                self.optimizers.append(optimizer_cls(params, **kwargs))
+            self.optimizers.append(optimizer_cls(params, **kwargs))
             all_params.extend(params)
         self._validate_length(len(self.model_parts))
         # Do not separately save the external settings in
