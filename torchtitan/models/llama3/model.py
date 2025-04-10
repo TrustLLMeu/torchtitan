@@ -70,6 +70,16 @@ class TransformerModelArgs(BaseModelArgs):
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         for name in [
+                "first_in_init_fn_type",
+                "first_in_init_std",
+                "first_in_exp",
+                "intermediate_init_fn_type",
+                "intermediate_init_std",
+                "intermediate_exp",
+                "init_gate_as_residual",
+                "final_out_init_fn_type",
+                "final_out_init_std",
+                "final_out_exp",
                 "norm_type",
                 "use_flex_attn",
                 "attn_mask_type",

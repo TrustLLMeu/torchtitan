@@ -68,6 +68,8 @@ class JobConfig:
     """
 
     def __init__(self):
+        from torchtitan.models.inits import INIT_FN_TYPES
+
         self.args_dict = None
         # main parser
         self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
@@ -208,6 +210,75 @@ class JobConfig:
             type=str,
             default="debugmodel",
             help="Which model config to train",
+        )
+        self.parser.add_argument(
+            "--model.first_in_init_fn_type",
+            type=str,
+            default="normal",
+            choices=INIT_FN_TYPES,
+            help="Weight initialization method to use for the first input layer.",
+        )
+        self.parser.add_argument(
+            "--model.first_in_init_std",
+            type=float,
+            default=1.0,
+            help="Standard deviation multiplier for first input layer's weight initialization",
+        )
+        self.parser.add_argument(
+            "--model.first_in_exp",
+            type=float,
+            default=0.0,
+            help="""
+                Exponent applied to the first input layer's input dimensionality
+                to obtain its init std factor.""",
+        )
+        self.parser.add_argument(
+            "--model.intermediate_init_fn_type",
+            type=str,
+            default="normal",
+            choices=INIT_FN_TYPES,
+            help="Weight initialization method to use for intermediate layers.",
+        )
+        self.parser.add_argument(
+            "--model.intermediate_init_std",
+            type=float,
+            default=0.02,
+            help="Standard deviation multiplier for intermediate layers' weight initialization",
+        )
+        self.parser.add_argument(
+            "--model.intermediate_exp",
+            type=float,
+            default=0.0,
+            help="""
+                Exponent applied to the model's hidden dimensionality to obtain
+                intermediate layers' init std factors.""",
+        )
+        self.parser.add_argument(
+            "--model.no_init_gate_as_residual",
+            dest="model.init_gate_as_residual",
+            action="store_false",
+            help="Whether to initialize the GLU gate as if it was a residual layer.",
+        )
+        self.parser.add_argument(
+            "--model.final_out_init_fn_type",
+            type=str,
+            default="trunc_normal",
+            choices=INIT_FN_TYPES,
+            help="Weight initialization method to use for the final output layer.",
+        )
+        self.parser.add_argument(
+            "--model.final_out_init_std",
+            type=float,
+            default=1.0,
+            help="Standard deviation multiplier for final output layer's weight initialization",
+        )
+        self.parser.add_argument(
+            "--model.final_out_exp",
+            type=float,
+            default=-0.5,
+            help="""
+                Exponent applied to the final output layer's input dimensionality
+                to obtain its init std factor.""",
         )
         self.parser.add_argument(
             "--model.norm_type",
