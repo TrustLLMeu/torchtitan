@@ -69,7 +69,13 @@ class TransformerModelArgs(BaseModelArgs):
     num_mtp_modules: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.norm_type = job_config.model.norm_type
+        for name in [
+                "norm_type",
+                "use_flex_attn",
+                "attn_mask_type",
+        ]:
+            value = getattr(job_config.model, name)
+            setattr(self, name, value)
         self.vocab_size = tokenizer.n_words
         if job_config.model.vocab_size_multiple_of:
             vocab_divisor = job_config.model.vocab_size_multiple_of
@@ -81,8 +87,6 @@ class TransformerModelArgs(BaseModelArgs):
                 f"Padded vocab size from {tokenizer.n_words} to {self.vocab_size}."
             )
         self.max_seq_len = job_config.training.seq_len
-        self.use_flex_attn = job_config.model.use_flex_attn
-        self.attn_mask_type = job_config.model.attn_mask_type
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams_not_ffn = 0
