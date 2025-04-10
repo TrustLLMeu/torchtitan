@@ -340,6 +340,13 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
                                 norms[f"model_part_{i}/{n}/update/{norm_name}"] = norm_func(update)
         return norms
 
+    def get_lrs(self):
+        lrs = {}
+        for i, optimizer in enumerate(self.optimizers):
+            for k, group in enumerate(optimizer.param_groups):
+                lrs[f"lr/opt_{i}/group_{k}"] = group["lr"]
+        return lrs
+
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(self.optimizers), (
             "Must pass one optimizer per model part or per param if "
