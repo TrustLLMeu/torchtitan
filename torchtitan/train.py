@@ -20,7 +20,11 @@ import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import build_cross_entropy_loss, moe_loss, multi_token_cross_entropy_loss
+from torchtitan.components.loss import (
+    build_cross_entropy_loss,
+    moe_loss,
+    multi_token_cross_entropy_loss,
+)
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
