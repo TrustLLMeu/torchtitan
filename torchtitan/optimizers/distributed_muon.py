@@ -70,7 +70,16 @@ class DistributedMuon(Muon):
                 """
                 g = zero_tensor(params[end_idx - 1].shape)
 
-            u = zeropower_via_newtonschulz5(g, steps=ns_steps)
+            if g.ndim == 2:
+                u = zeropower_via_newtonschulz5(g, steps=ns_steps)
+            else:
+                u = torch.stack(
+                    [
+                        zeropower_via_newtonschulz5(g[i], steps=ns_steps)
+                        for i in range(g.shape[0])
+                    ],
+                    dim=0,
+                )
 
             # Step 3: FOR DDP, we do all-gather
             gather_lists = [None] * world_size
@@ -155,7 +164,16 @@ class DistributedMuon(Muon):
             # All tensors in recv_list should have the same dimensions except for dim 0
 
             full_g = torch.cat(recv_list, dim=0)
-            u = zeropower_via_newtonschulz5(full_g, steps=ns_steps)
+            if full_g.ndim == 2:
+                u = zeropower_via_newtonschulz5(full_g, steps=ns_steps)
+            else:
+                u = torch.stack(
+                    [
+                        zeropower_via_newtonschulz5(full_g[i], steps=ns_steps)
+                        for i in range(full_g.shape[0])
+                    ],
+                    dim=0,
+                )
 
             # Step 6: Split the processed tensor back for second all_to_all
             split_sizes = [shape[0] for shape in recv_shapes]

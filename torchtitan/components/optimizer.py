@@ -241,7 +241,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
                 buf = buf.mul(1 - momentum).add(g, alpha=momentum)
                 g = buf if not nesterov else buf.mul(1 - momentum).add(g, alpha=momentum)
             if optimizer.fsdp_enabled:
-                g = gather_full_grad(g)
+                g = gather_full_grad(g).to_local()
 
             return optimizer.lmo(g, **kwargs)
         elif isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
@@ -512,6 +512,10 @@ def build_optimizers(
         fused = optim_implementation == "fused"
         foreach = optim_implementation == "foreach"
 
+        mesh_dim_names = extra_kwargs["world_mesh"].mesh_dim_names
+        ep_enable = "dp_shard_1" in mesh_dim_names or "dp_shard_2" in mesh_dim_names
+        if ep_enable:
+            fused = False
         width_multiplier = job_config.model.mup_width_multiplier
         # TODO Remove this deprecation handling at some point. Added on 2025-04-10.
         if "-multiplier-" in job_config.model.flavor:

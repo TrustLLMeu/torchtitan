@@ -128,9 +128,14 @@ def parallelize_llama(
 
         dp_mod_ep_mesh_dim_names = []
         if parallel_dims.ep_mode == "naive_dp2ep" and parallel_dims.ep_enabled:
+            dp_mesh_dim_names = []
             if parallel_dims.dp_replicate_enabled:
                 dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_1")
+                dp_mesh_dim_names.append("dp_replicate")
+            dp_mesh_dim_names.extend(["dp_shard_1", "dp_shard_2"])
+            dp_mod_ep_mesh_dim_names.append("dp_shard_2")
+            if parallel_dims.cp_enabled:
+                dp_mesh_dim_names.append("cp")
 
         apply_fsdp(
             model,
@@ -395,7 +400,7 @@ def apply_compile(model: nn.Module):
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block)
+        transformer_block = torch.compile(transformer_block, dynamic=True)
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
@@ -455,18 +460,12 @@ def apply_fsdp(
 
         fsdp_mod_ep_config = fsdp_config.copy()
         fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-        # if ep_enabled:
-        #     fully_shard(
-        #         transformer_block.moe.experts,
-        #         **fsdp_mod_ep_config,
-        #         reshard_after_forward=reshard_after_forward,
-        #     )
-        # if ep_enabled:
-        #     fully_shard(
-        #         transformer_block.feed_forward,
-        #         **fsdp_config,
-        #         reshard_after_forward=reshard_after_forward,
-        #     )
+        if ep_enabled and transformer_block.feed_forward.experts is not None:
+            fully_shard(
+                transformer_block.feed_forward.experts,
+                **fsdp_mod_ep_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
         fully_shard(
             transformer_block,

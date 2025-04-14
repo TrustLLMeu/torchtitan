@@ -24,9 +24,23 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
     expert_per_rank = total_experts // ep_size
 
     if ep_size == 1:
-        # For single expert case, use rearrange to maintain consistent ordering
-        return rearrange(x, "(er t) d -> er t d", er=expert_per_rank), tokens_per_expert
+        dim = x.shape[1]
+        num_experts = tokens_per_expert.shape[0]
+        max_tokens = torch.max(tokens_per_expert)
 
+        output = torch.zeros(
+            (num_experts, max_tokens, dim),
+            device=x.device,
+            dtype=x.dtype,
+        )
+
+        start = 0
+        for i in range(len(tokens_per_expert)):
+            n = tokens_per_expert[i]
+            if n > 0:
+                output[i, :n] = x[start : start + n]
+                start += n
+        return output, tokens_per_expert.view(1, -1)  # shape: [1, num_experts]
     # Synchronize tokens_per_expert across all processes
 
     tokens_per_expert_list = [
@@ -36,17 +50,15 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
         tokens_per_expert_list, tokens_per_expert, group=ep_mesh.get_group()
     )
 
-    # Combine into a single tensor
-    all_tokens_per_expert = torch.stack(
-        tokens_per_expert_list
-    )  # Shape: [ep_size, num_experts]
+    # Combine into a single tensor -> [ep_size, num_experts]
+    all_tokens_per_expert = torch.stack(tokens_per_expert_list)
 
     # Compute offsets for each expert's tokens in the flattened tensor
     token_offsets = torch.zeros_like(tokens_per_expert)
     token_offsets[1:] = torch.cumsum(tokens_per_expert[:-1], dim=0)
 
     # Find maximum tokens per expert across all ranks for padding
-    max_tokens = max([tpe.max().item() for tpe in tokens_per_expert_list])
+    max_tokens = torch.stack([tpe.max() for tpe in tokens_per_expert_list]).max()
 
     # Reshape input according to variable tokens per expert
     expert_tensors = []
@@ -54,7 +66,7 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
     for i in range(total_experts):
         # Extract tokens for this expert
         start_idx = token_offsets[i]
-        expert_tokens = x[start_idx:start_idx + tokens_per_expert[i]]
+        expert_tokens = x[start_idx : start_idx + tokens_per_expert[i]]
 
         # Pad to max_tokens if necessary
         if expert_tokens.shape[0] < max_tokens:
@@ -63,6 +75,7 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
                 dtype=x.dtype,
                 device=x.device,
             )
+
             expert_tokens = torch.cat([expert_tokens, padding], dim=0)
 
         expert_tensors.append(expert_tokens.unsqueeze(0))  # Add expert dimension
@@ -75,12 +88,8 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
         x_reshaped, "(ep er) t d -> ep (er t) d", ep=ep_size, er=expert_per_rank
     ).contiguous()
 
-    # Prepare output tensor
-    output = torch.empty_like(x_for_a2a)
-
-    # Perform all-to-all communication
-    torch.distributed.nn.functional.all_to_all_single(
-        output, x_for_a2a, group=ep_mesh.get_group()
+    output = torch.distributed.nn.functional.all_to_all_single(
+        torch.empty_like(x_for_a2a), x_for_a2a, group=ep_mesh.get_group()
     )
 
     # Rearrange output to the correct final shape
@@ -106,26 +115,28 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
                               containing number of tokens per expert across all ranks
 
     Returns:
-        output: Tensor of shape (num_experts*tokens_per_expert, dim_in) - flattened tokens
+        output: Tensor of shape (num_experts, tokens_per_expert, dim_in) - flattened tokens
     """
     expert_per_rank, tokens_per_all_ranks, dim_in = x.shape
     total_experts = expert_per_rank * ep_size
     max_tokens_per_expert = tokens_per_all_ranks // ep_size
 
     if ep_size == 1:
-        return rearrange(x, "er t d -> (er t) d")
-
+        tokens_per_expert = all_tokens_per_expert[0]  # [num_experts]
+        output_chunks = []
+        for i in range(x.shape[0]):
+            n = tokens_per_expert[i].item()
+            if n > 0:
+                output_chunks.append(x[i, :n])
+        return torch.cat(output_chunks, dim=0)  # shape: [total_routed_tokens, dim]
     # Rearrange to prepare for all-to-all communication
     x_for_a2a = rearrange(
         x, "er (ep t) d -> ep (er t) d", ep=ep_size, t=max_tokens_per_expert
     ).contiguous()
 
-    # Prepare output tensor for all-to-all
-    output_a2a = torch.empty_like(x_for_a2a)
-
     # Perform all-to-all communication
-    torch.distributed.nn.functional.all_to_all_single(
-        output_a2a, x_for_a2a, group=ep_mesh.get_group()
+    output_a2a = torch.distributed.nn.functional.all_to_all_single(
+        torch.empty_like(x_for_a2a), x_for_a2a, group=ep_mesh.get_group()
     )
 
     # Rearrange to get experts back in their original form
@@ -142,19 +153,12 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
     # Calculate total tokens to allocate the output tensor
     total_tokens = tokens_per_expert.sum().item()
 
-    # Create the final flattened output tensor
-    flattened_output = torch.zeros(
-        (total_tokens, dim_in), dtype=experts_output.dtype, device=experts_output.device
-    )
-
-    # Copy tokens to the final output, removing padding
-    current_idx = 0
+    output_chunks = []
     for i in range(len(tokens_per_expert)):
         num_tokens = tokens_per_expert[i].item()
         if num_tokens > 0:
-            flattened_output[current_idx:current_idx + num_tokens] = experts_output[
-                i, :num_tokens
-            ]
-            current_idx += num_tokens
+            output_chunks.append(experts_output[i, :num_tokens])
+
+    flattened_output = torch.cat(output_chunks, dim=0)
 
     return flattened_output

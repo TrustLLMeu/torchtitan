@@ -284,14 +284,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
-
-                # TODO(JSC): remove this after fix MoE parallel
-                if parallel_dims.ep_enabled and parallel_dims.ep_mode == "naive_dp2ep":
-                    for p_name, p in m.named_parameters():
-                        if p.requires_grad:
-                            # force set grad to 0
-                            p.grad = torch.zeros_like(p)
-
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -305,14 +297,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
-
-            # TODO(JSC): remove this after fix MoE parallel
-            if parallel_dims.ep_enabled and parallel_dims.ep_mode == "naive_dp2ep":
-                for p_name, p in model.named_parameters():
-                    if p.requires_grad:
-                        # force set grad to 0
-                        p.grad = torch.zeros_like(p)
-
             model.train()
 
             self.model_parts = [model]
@@ -465,9 +449,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return loss, aux_loss, moe_entropy_per_layer
 
     def train_step(self, data_iterator: Iterable):
-        # TODO(JSC): if we shard the MoE model, we need to remove the following code
-        self.optimizers.zero_grad(set_to_none=not self.parallel_dims.ep_enabled)
-
+        self.optimizers.zero_grad()
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         model_parts = self.model_parts
@@ -490,21 +472,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if hasattr(model, "update_gate_bias"):
                 model.update_gate_bias()
 
-        # TODO(JSC): if we shard the MoE model, we need to remove the following code
-        if parallel_dims.ep_enabled and parallel_dims.ep_mode == "naive_dp2ep":
-            """
-            The reason is the gradinet of routed experts is reduced by the number of experts
-            but the only 1/ep_size of the parameters are updated.
-            """
-            for model in model_parts:
-                for p_name, p in model.named_parameters():
-                    if "feed_forward.experts" in p_name:
-                        if p.grad is not None:
-                            p.grad = p.grad * parallel_dims.ep
-                        else:
-                            raise Exception(f"p_name: {p_name} and p.grad is None")
+        # # TODO(JSC): if we shard the MoE model, we need to remove the following code
+        for model in model_parts:
+            for p_name, p in model.named_parameters():
+                if p.grad is None:
+                    raise Exception(f"p_name: {p_name} and p.grad is None")
 
         grad_norm = None
+        # TODO(JSC): disable gradient clipping for now for debugging
         if self.job_config.training.max_norm > 0:
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],

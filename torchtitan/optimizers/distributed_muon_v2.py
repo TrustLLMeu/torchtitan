@@ -101,8 +101,15 @@ class DistributedMuonV2(DistributedMuon):
 
                 else:
                     g = zero_tensor(params[end_idx - 1].shape)
-                u = zeropower_via_newtonschulz5(g, steps=ns_steps)
-
+                if g.ndim == 2:
+                    u = zeropower_via_newtonschulz5(g, steps=ns_steps)
+                else:
+                    u = torch.stack(
+                        [
+                            zeropower_via_newtonschulz5(g[i], steps=ns_steps)
+                            for i in range(g.shape[0])
+                        ],
+                    )
                 # Prepare gather lists
                 gather_lists = [None] * world_size
                 for i in range(world_size):
@@ -243,7 +250,15 @@ class DistributedMuonV2(DistributedMuon):
                 # All tensors in recv_list should have the same dimensions except for dim 0
                 try:
                     full_g = torch.cat(recv_list, dim=0)
-                    u = zeropower_via_newtonschulz5(full_g, steps=ns_steps)
+                    if full_g.ndim == 2:
+                        u = zeropower_via_newtonschulz5(full_g, steps=ns_steps)
+                    else:
+                        u = torch.stack(
+                            [
+                                zeropower_via_newtonschulz5(full_g[i], steps=ns_steps)
+                                for i in range(full_g.shape[0])
+                            ],
+                        )
                 except RuntimeError as e:
                     # Print debug info for troubleshooting
                     shapes_info = [t.shape for t in recv_list]

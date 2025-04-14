@@ -1,4 +1,5 @@
 import torch
+import torch.distributed.tensor
 
 from torchtitan.optimizers.muon_utils import zeropower_backends, gather_full_grad, shard_full_grad
 
@@ -82,10 +83,17 @@ class Scion(torch.optim.Optimizer):
                     g = buf if not nesterov else buf.mul(1-momentum).add(g, alpha=momentum)
 
                 if self.fsdp_enabled:
+                    device_mesh = g.device_mesh
+                    placements = g.placements
                     g = gather_full_grad(g)
-                update = self.lmo(g, **param_kwargs)
+                update = self.lmo(g.to_local(), **param_kwargs)
                 if self.fsdp_enabled:
-                    update = shard_full_grad(update)
+                    # update = shard_full_grad(update)
+                    update = torch.distributed.tensor.distribute_tensor(
+                        update,
+                        device_mesh=device_mesh,
+                        placements=placements,
+                    )
                 if update.shape != p.data.shape:
                     raise RuntimeError(
                         f"Shape mismatch: g.shape={g.shape}, p.data.shape={p.data.shape}"
@@ -104,7 +112,18 @@ class Scion(torch.optim.Optimizer):
     def lmo(self, g, eps, norm_factor, zeropower_backend, backend_steps):
         # NB: make sure this function does not modify the grad inplace
         #     since it is also called during the log of gradients
-        g = zeropower_backend(g, steps=backend_steps, eps=eps)
+        # g = zeropower_backend(g, steps=backend_steps, eps=eps)
+        if g.ndim == 2:
+            g = zeropower_backend(g, steps=backend_steps, eps=eps)
+        else:
+            g = torch.stack(
+                [
+                    zeropower_backend(g[i], steps=backend_steps, eps=eps)
+                    for i in range(g.shape[0])
+                ],
+                dim=0,
+            )
+
         g = self.normalise_grad(g, norm_factor=norm_factor, eps=eps)
 
         return g
