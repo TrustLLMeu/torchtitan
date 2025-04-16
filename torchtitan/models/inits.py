@@ -22,12 +22,6 @@ def orthogonal_(params, gain: float = 1.0, generator: Optional[torch.Generator] 
     if not isinstance(params.data, DTensor):
         return nn.init.orthogonal_(params, gain=gain, generator=generator)
     else:
-        assert generator is not None, "distributed orthogonal init needs an RNG seed"
-        # Force all ranks to use same RNG.
-        rng_state = generator.get_state()
-        torch.distributed.broadcast(rng_state, group_src=0)
-        generator.set_state(rng_state)
-
         temp_tensor = torch.empty(params.shape)  # full shape
         torch.nn.init.orthogonal_(temp_tensor, gain=gain, generator=generator)
 
