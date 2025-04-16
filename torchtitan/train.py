@@ -534,6 +534,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     k: dist_utils.dist_mean(v, world_mesh["dp_cp"])
                     for (k, v) in moe_entropy_per_layer.items()
                 }
+                bias_list = []
+                for m_name, m in model_parts[0].named_modules():
+                    if "feed_forward.gate" in m_name and m.bias is not None:
+                        bias_list.append(m.bias)
+            else:
+                bias_list = None
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -554,6 +560,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if moe_entropy_per_layer is not None:
             for (k, v) in moe_entropy_per_layer.items():
                 extra_metrics[f"loss_metrics/moe_entropy_per_layer_{k}"] = v
+        if bias_list is not None:
+            for bias_i in range(len(bias_list)):
+                extra_metrics[f"model/bias_{bias_i}"] = bias_list[bias_i].mean()
 
         color = self.metrics_processor.color
         extra_print_data = ""
