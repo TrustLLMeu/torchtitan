@@ -1,7 +1,8 @@
 import torch
 import torch.distributed.tensor
+from torch.distributed.tensor import DTensor
 
-from torchtitan.optimizers.muon_utils import zeropower_backends, gather_full_grad, shard_full_grad
+from torchtitan.optimizers.muon_utils import zeropower_backends, gather_full_grad
 
 __all__ = [
     'Scion',
@@ -29,7 +30,10 @@ class Scion(torch.optim.Optimizer):
                         backend=backend, backend_steps=backend_steps)
         self.is_light = is_light
         self.is_unconstrained = is_unconstrained
-        self.fsdp_enabled = world_mesh is not None and "dp_shard" in world_mesh.mesh_dim_names
+        mesh_dim_names = world_mesh.mesh_dim_names if world_mesh is not None else None
+        self.fsdp_enabled = mesh_dim_names is not None and (
+            "dp_shard" in mesh_dim_names or "dp_shard_1" in mesh_dim_names
+        )
         print(
             f"Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained})"
             f" is enabled with world_mesh={world_mesh} | fsdp_enabled={self.fsdp_enabled}"
@@ -86,7 +90,10 @@ class Scion(torch.optim.Optimizer):
                     device_mesh = g.device_mesh
                     placements = g.placements
                     g = gather_full_grad(g)
-                update = self.lmo(g.to_local(), **param_kwargs)
+                if isinstance(g, DTensor):
+                    update = self.lmo(g.to_local(), **param_kwargs)
+                else:
+                    update = self.lmo(g, **param_kwargs)
                 if self.fsdp_enabled:
                     # update = shard_full_grad(update)
                     update = torch.distributed.tensor.distribute_tensor(
