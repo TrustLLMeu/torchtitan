@@ -20,13 +20,13 @@ __all__ = [
 
 moe_llama3_configs = {
     "debugmodel": MoEModelArgs(
-        dim=256,
+        dim=512,  # beaware this if 2x then the llama3-debugmodel
         n_layers=8,
         n_heads=16,
         rope_theta=500000,
         n_shared_experts=1,
-        activate_experts=8,
-        n_routed_experts=64,
+        activate_experts=2,
+        n_routed_experts=8,
     ),
     "1B-7B": MoEModelArgs(
         dim=2048,
