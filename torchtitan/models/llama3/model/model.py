@@ -499,6 +499,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        start_pos: int = -1,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -511,7 +512,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, start_pos=start_pos
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -797,7 +800,7 @@ class Transformer(nn.Module, ModelProtocol):
         if not isinstance(inputs, dict):
             inputs = {"tokens_list": inputs}
         tokens_list = inputs["tokens_list"]
-        start_pos = -1
+        start_pos = inputs.get("start_pos", -1)
         prev_embed = inputs.get("prev_embed", None)
         if not isinstance(tokens_list, list):
             tokens = tokens_list
