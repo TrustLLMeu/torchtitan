@@ -145,6 +145,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # set the model args from training job configs
         model_args.update_from_config(job_config, tokenizer=self.tokenizer)
         self.model_args = model_args
+        self.save_model_args(model_args)
 
         logger.info(
             f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
