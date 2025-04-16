@@ -787,7 +787,11 @@ class Transformer(nn.Module, ModelProtocol):
         # TODO: We will to change forward() signature to allow tokens to
         # be always passed in.
         if self.model_args.use_flex_attn:
-            init_attention_mask(tokens, eos_id=self.eos_id)
+            init_attention_mask(tokens, eos_id=self.eos_id, start_pos=start_pos)
+        elif start_pos >= 0:
+            raise ValueError("`start_pos >= 0`, but cannot use caching without FlexAttention")
+
+        seqlen = tokens.shape[1]
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = (
@@ -796,8 +800,12 @@ class Transformer(nn.Module, ModelProtocol):
             else tokens
         )
 
+        if start_pos >= 0:
+            freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+        else:
+            freqs_cis = self.freqs_cis
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, start_pos=start_pos)
+            h = layer(h, freqs_cis, start_pos=start_pos)
 
         h = self.norm(h) if self.norm else h
 
@@ -825,6 +833,7 @@ class Transformer(nn.Module, ModelProtocol):
             "tokens_list": tokens_list,
             "orig_tokens": orig_tokens,
             "prev_embed": prev_embed,
+            "start_pos": start_pos,
         }
 
     @classmethod

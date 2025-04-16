@@ -56,6 +56,15 @@ class FlexAttention(torch.nn.Module):
         return causal_mask
 
     @staticmethod
+    def _get_cached_causal_mask_fn(start_pos: int) -> Callable:
+        assert start_pos >= 0
+
+        def cached_causal_mask(b, h, q_idx, kv_idx):
+            return (kv_idx >= start_pos) & (q_idx >= kv_idx)
+
+        return cached_causal_mask
+
+    @staticmethod
     def _get_block_causal_mask_fn(batch: torch.Tensor, eos_id: int) -> Callable:
         # batch is [b, s, h, d] shape
         mask = batch == eos_id
@@ -71,7 +80,11 @@ class FlexAttention(torch.nn.Module):
 
     @staticmethod
     @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
+    def init_attention_mask(
+            batch: torch.Tensor,
+            eos_id: Optional[int] = None,
+            start_pos: int = -1,
+    ) -> None:
         # batch is [b, s, h, d] shape
         for attn_mask_type in FlexAttention.used_attn_mask_types:
             match attn_mask_type:
@@ -81,12 +94,17 @@ class FlexAttention(torch.nn.Module):
                     # We don't care about batch dimension --
                     # all samples have the same lower triangle mask.
                     batch_dimension = 1
-                    mask_fn = FlexAttention._get_causal_mask_fn()
+                    if start_pos >= 0:
+                        mask_fn = FlexAttention._get_cached_causal_mask_fn(start_pos)
+                    else:
+                        mask_fn = FlexAttention._get_causal_mask_fn()
                 case "block_causal":
                     if eos_id is None:
                         raise RuntimeError(
                             "eos_id must be provided for block_causal mask."
                         )
+                    if start_pos >= 0:
+                        raise ValueError('`start_pos` not supported with "block_causal" mask.')
                     batch_dimension = batch.shape[0]
                     mask_fn = FlexAttention._get_block_causal_mask_fn(batch, eos_id)
                 case _:
@@ -94,7 +112,11 @@ class FlexAttention(torch.nn.Module):
 
             seq_len = batch.shape[1]
             block_mask = FlexAttention.compiled_create_block_mask(
-                mask_fn, batch_dimension, None, seq_len, seq_len
+                mask_fn,
+                batch_dimension,
+                None,
+                seq_len,
+                seq_len + (start_pos if start_pos >= 0 else 0),
             )
             FlexAttention.block_masks[attn_mask_type] = block_mask
 
@@ -120,5 +142,9 @@ def build_attention(use_flex_attn: bool, attn_mask_type: str):
         return ScaledDotProductAttention(attn_mask_type)
 
 
-def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
-    FlexAttention.init_attention_mask(batch, eos_id)
+def init_attention_mask(
+        batch: torch.Tensor,
+        eos_id: Optional[int] = None,
+        start_pos: int = -1,
+) -> None:
+    FlexAttention.init_attention_mask(batch, eos_id, start_pos=start_pos)
