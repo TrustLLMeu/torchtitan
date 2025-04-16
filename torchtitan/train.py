@@ -371,14 +371,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
     def save_job_config(self):
-        # Save job config to dump folder.
-        os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
-        job_config_save_path = os.path.join(
-            self.job_config.job.dump_folder,
-            "job_config_" + datetime.datetime.now().strftime("%Y%m%d-%H%M") + ".json",
-        )
-        with open(job_config_save_path, "w") as f:
-            json.dump(self.job_config.to_dict(), f)
+        if os.environ["RANK"] == 0:
+            # Save job config to dump folder.
+            os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
+            job_config_save_path = os.path.join(
+                self.job_config.job.dump_folder,
+                "job_config_" + datetime.datetime.now().strftime("%Y%m%d-%H%M") + ".json",
+            )
+            with open(job_config_save_path, "w") as f:
+                json.dump(self.job_config.to_dict(), f)
 
     def next_batch(
         self, data_iterator: Iterable
