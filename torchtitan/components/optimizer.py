@@ -158,6 +158,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
         param_groups_config = optimizer_kwargs.get("param_groups", None)
+
         for model in self.model_parts:
             # copy parts we will pop from to preserve settings across model parts
             kwargs = optimizer_kwargs.copy()
