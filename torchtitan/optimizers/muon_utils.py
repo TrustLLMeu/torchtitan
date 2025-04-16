@@ -28,8 +28,9 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
 
-    assert len(G.shape) == 2, \
-        f"Please make sure gradients are 2D tensors to use NS, got shape: {G.shape}"
+    assert (
+        len(G.shape) == 2
+    ), f"Please make sure gradients are 2D tensors to use NS, got shape: {G.shape}"
     a, b, c = (3.4445, -4.7750, 2.0315)
     #     for a, b, c in [ # updated coefficients from @leloykun
     #     (4.0848, -6.8946, 2.9270),
@@ -57,9 +58,11 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     return X.to(original_dtype)
 
 
-zeropower_backends = dict(svd=zeropower_via_svd,
-                          newtonschulz5=zeropower_via_newtonschulz5,
-                          identity=lambda x, **kwargs: x)
+zeropower_backends = dict(
+    svd=zeropower_via_svd,
+    newtonschulz5=zeropower_via_newtonschulz5,
+    identity=lambda x, **kwargs: x,
+)
 
 
 def _init_adamw_group(
