@@ -152,7 +152,7 @@ class MoEModelArgs(BaseModelArgs):
         # 4. we follow the convention and do not account for sparsity in causal attention
         num_flops_per_token = 6 * (nparams_active - nparams_embedding) + 12 * l * h * q * t
 
-        return nparams_total, num_flops_per_token
+        return nparams_active, nparams_total, num_flops_per_token
 
 
 class Gate(nn.Module):

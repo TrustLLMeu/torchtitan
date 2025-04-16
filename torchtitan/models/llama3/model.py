@@ -136,7 +136,7 @@ class TransformerModelArgs(BaseModelArgs):
         # 4. we follow the convention and do not account for sparsity in causal attention
         num_flops_per_token = 6 * (nparams_active - nparams_embedding) + 12 * l * h * q * t
 
-        return nparams_total, num_flops_per_token
+        return nparams_active, nparams_total, num_flops_per_token
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
