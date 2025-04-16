@@ -45,46 +45,18 @@ class GroupedExperts(nn.Module):
         self.act_fn = F.silu
 
     def __repr__(self):
-        model_str = f"GroupedExperts(dim_in={self.dim_in}, dim_hidden={self.dim_out}, num_experts={self.num_experts}, ep_size={self.ep_size} \n"
+        model_str = f"GroupedExperts(dim_in={self.dim_in}, dim_hidden={self.dim_out},\n"
+        model_str += f"\tnum_experts={self.num_experts}, local_experts={self.expert_per_rank}, ep_size={self.ep_size}\n"
         model_str += f"\tgate_proj={self.gate_proj.shape}, \n"
         model_str += f"\tdown_proj={self.down_proj.shape}, \n"
         model_str += f"\tup_proj={self.up_proj.shape}, \n"
         model_str += ")"
         return model_str
 
-    def setup_ep(self, ep_mesh=None, ep_size=None):
+    def setup_ep(self, ep_mesh, ep_size):
         self.ep_mesh = ep_mesh
-        self.ep_size = ep_size if ep_size is not None else 1
-        if ep_size is None or ep_size == 1 or ep_mesh is None:
-            return
-
-        if ep_size > self.num_experts:
-            raise ValueError(
-                f"ep_size {ep_size} is less than the number of experts {self.num_experts}"
-            )
-        if self.num_experts % ep_size != 0:
-            raise ValueError(
-                f"ep_size {ep_size} does not divide the number of experts {self.num_experts}"
-            )
-
-        # otherwise, we re-distribute the experts and copy the parameters from the original gate_proj, down_proj, up_proj
+        self.ep_size = ep_size
         self.expert_per_rank = self.num_experts // ep_size
-
-        gate_proj = nn.Parameter(
-            torch.empty(self.expert_per_rank, self.dim_in, self.dim_out)
-        )
-
-        down_proj = nn.Parameter(
-            torch.empty(self.expert_per_rank, self.dim_in, self.dim_out)
-        )
-
-        up_proj = nn.Parameter(
-            torch.empty(self.expert_per_rank, self.dim_out, self.dim_in)
-        )
-
-        self.register_parameter("gate_proj", gate_proj)
-        self.register_parameter("down_proj", down_proj)
-        self.register_parameter("up_proj", up_proj)
 
     def forward(
         self,
@@ -98,9 +70,15 @@ class GroupedExperts(nn.Module):
             torch.Tensor: with shape (experts_per_rank, tokens_per_expert, dim_in) for Expert Choice(EC).
         """
 
-        h = self.act_fn(torch.bmm(x, self.gate_proj))
-        h = h * torch.bmm(x, self.down_proj)
-        out = torch.bmm(h, self.up_proj)
+        if isinstance(self.gate_proj, torch.distributed.tensor.DTensor):
+            h = self.act_fn(torch.bmm(x, self.gate_proj.to_local()))
+            h = h * torch.bmm(x, self.down_proj.to_local())
+            out = torch.bmm(h, self.up_proj.to_local())
+
+        else:
+            h = self.act_fn(torch.bmm(x, self.gate_proj))
+            h = h * torch.bmm(x, self.down_proj)
+            out = torch.bmm(h, self.up_proj)
 
         return out
 

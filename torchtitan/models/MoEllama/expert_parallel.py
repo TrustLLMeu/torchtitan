@@ -278,52 +278,49 @@ class ExpertParallel(ParallelStyle):
         self.desired_input_layouts = (Shard(0),)
         self.use_local_output = use_local_output
 
-    @staticmethod
-    def _prepare_input_fn(
-        input_layouts, desired_input_layouts, mod, inputs, device_mesh
-    ):
-        # TODO: figure out dynamo support for instance method and switch this to instance method
+    # @staticmethod
+    # def _prepare_input_fn(
+    #     input_layouts, desired_input_layouts, mod, inputs, device_mesh
+    # ):
+    #     # TODO: figure out dynamo support for instance method and switch this to instance method
 
-        # annotate module input placements/sharding with input_layouts
-        input_tensor = inputs[0]
-        if not isinstance(input_tensor, DTensor):
-            input_tensor = DTensor.from_local(
-                input_tensor, device_mesh, input_layouts, run_check=False
-            )
+    #     # annotate module input placements/sharding with input_layouts
+    #     input_tensor = inputs[0]
+    #     if not isinstance(input_tensor, DTensor):
+    #         input_tensor = DTensor.from_local(
+    #             input_tensor, device_mesh, input_layouts, run_check=False
+    #         )
 
-        if input_layouts != desired_input_layouts:
-            input_tensor = input_tensor.redistribute(
-                placements=desired_input_layouts, async_op=True
-            )
-        return input_tensor
+    #     if input_layouts != desired_input_layouts:
+    #         input_tensor = input_tensor.redistribute(
+    #             placements=desired_input_layouts, async_op=True
+    #         )
+    #     return input_tensor
+
+    # @staticmethod
+    # def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
+    #     # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
+    #     if outputs.placements != output_layouts:
+    #         outputs = outputs.redistribute(placements=output_layouts, async_op=True)
+    #     # back to local tensor
+    #     return outputs.to_local() if use_local_output else outputs
 
     def _partition_fn(self, name, module, device_mesh):
-        pass
-        # shard on the expert dimension
-        # for name, param in module.named_parameters(recurse=False):
-        #     dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
-        #     module.register_parameter(name, dist_param)
-        # TODO(FZJ): NEED TO FIX THIS LATER, DONT KNOW IF ITS A PYTORCH BUG OR NOT
-
-    @staticmethod
-    def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
-        # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
-        if outputs.placements != output_layouts:
-            outputs = outputs.redistribute(placements=output_layouts, async_op=True)
-        # back to local tensor
-        return outputs.to_local() if use_local_output else outputs
+        for name, param in module.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            module.register_parameter(name, dist_param)
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
             module,
             device_mesh,
             self._partition_fn,
-            partial(
-                self._prepare_input_fn, self.input_layouts, self.desired_input_layouts
-            ),
-            partial(
-                self._prepare_output_fn, self.output_layouts, self.use_local_output
-            ),
+            # partial(
+            #     self._prepare_input_fn, self.input_layouts, self.desired_input_layouts
+            # ),
+            # partial(
+            #     self._prepare_output_fn, self.output_layouts, self.use_local_output
+            # ),
         )
 
 

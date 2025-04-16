@@ -80,23 +80,23 @@ def parallelize_llama(
         if parallel_dims.ep_mode != "naive_dp2ep":
             ep_mesh = None
         else:
-            if "cp" in world_mesh.mesh_dim_names:
-                ep_mesh = world_mesh["ep"]
-            else:
-                ep_mesh = world_mesh["dp_shard_2"]
+            ep_mesh_dim_names = []
+            names = world_mesh.mesh_dim_names
+            if "dp_shard_2" in names:
+                ep_mesh_dim_names.append("dp_shard_2")
+            if "cp" in names:
+                ep_mesh_dim_names.append("cp")
+            ep_mesh = world_mesh[tuple(ep_mesh_dim_names)]
 
-        # tp_mesh = world_mesh["tp"] if parallel_dims.tp_enabled else None
+        tp_mesh = world_mesh["tp"] if parallel_dims.tp_enabled else None
 
-        for block in model.layers.values():
-            block.feed_forward.experts.setup_ep(ep_mesh, parallel_dims.ep)
-
-        # apply_ep(
-        #     model,
-        #     ep_mode=parallel_dims.ep_mode,
-        #     ep_mesh=ep_mesh,
-        #     tp_mesh=tp_mesh,
-        #     ep_tp_mesh=None,
-        # )
+        apply_ep(
+            model,
+            ep_mode=parallel_dims.ep_mode,
+            ep_mesh=ep_mesh,
+            tp_mesh=tp_mesh,
+            ep_tp_mesh=None,
+        )
 
     if job_config.model.use_flex_attn:
         if job_config.activation_checkpoint.mode == "selective":
@@ -128,14 +128,9 @@ def parallelize_llama(
 
         dp_mod_ep_mesh_dim_names = []
         if parallel_dims.ep_mode == "naive_dp2ep" and parallel_dims.ep_enabled:
-            dp_mesh_dim_names = []
             if parallel_dims.dp_replicate_enabled:
                 dp_mod_ep_mesh_dim_names.append("dp_replicate")
-                dp_mesh_dim_names.append("dp_replicate")
-            dp_mesh_dim_names.extend(["dp_shard_1", "dp_shard_2"])
-            dp_mod_ep_mesh_dim_names.append("dp_shard_2")
-            if parallel_dims.cp_enabled:
-                dp_mesh_dim_names.append("cp")
+            dp_mod_ep_mesh_dim_names.append("dp_shard_1")
 
         apply_fsdp(
             model,
@@ -283,16 +278,30 @@ def apply_ep(
     if ep_mode == "naive_dp2ep":
         if not tp_mesh:
             assert ep_mesh is not None
-            for _, transformer_block in model.layers.items():
+            ep_size = ep_mesh.size()
+
+            for block in model.layers.values():
+                # with ep_mesh:
+                block.feed_forward.experts.setup_ep(ep_mesh, ep_size)
+                total_experts = block.feed_forward.experts.num_experts
+                if ep_size > total_experts:
+                    raise ValueError(
+                        f"ep_size {ep_size} is less than the number of experts {total_experts}"
+                    )
+                if total_experts % ep_size != 0:
+                    raise ValueError(
+                        f"ep_size {ep_size} does not divide the number of experts {total_experts}"
+                    )
+
                 parallelize_module(
-                    module=transformer_block.feed_forward.experts,
+                    module=block.feed_forward.experts,
                     device_mesh=ep_mesh,
-                    # input / output sharding on the tokens dim
                     parallelize_plan=ExpertParallel(
-                        input_layouts=Shard(1),
-                        output_layouts=Shard(1),
+                        # input_layouts=Shard(1),
+                        # output_layouts=Shard(1),
                     ),
                 )
+
         else:
             assert ep_tp_mesh is not None
 

@@ -2,7 +2,7 @@ from einops import rearrange
 import torch
 
 
-def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
+def dispatch_tokens(x, ep_mesh, ep_size, tokens_per_expert, force_float32=False):
     """
     Dispatch tokens to corresponding experts using all_to_all_single.
 
@@ -18,7 +18,6 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
         all_tokens_per_expert: tensor of shape [ep_size, num_experts],
                               containing number of tokens per expert across all ranks
     """
-
     dim_in = x.shape[1]
     total_experts = len(tokens_per_expert)
     expert_per_rank = total_experts // ep_size
@@ -41,13 +40,17 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
                 output[i, :n] = x[start : start + n]
                 start += n
         return output, tokens_per_expert.view(1, -1)  # shape: [1, num_experts]
+
     # Synchronize tokens_per_expert across all processes
+    ep_group = ep_mesh.get_group()
 
     tokens_per_expert_list = [
         torch.zeros_like(tokens_per_expert) for _ in range(ep_size)
     ]
     torch.distributed.all_gather(
-        tokens_per_expert_list, tokens_per_expert, group=ep_mesh.get_group()
+        tokens_per_expert_list,
+        tokens_per_expert,
+        group=ep_group,
     )
 
     # Combine into a single tensor -> [ep_size, num_experts]
@@ -88,9 +91,17 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
         x_reshaped, "(ep er) t d -> ep (er t) d", ep=ep_size, er=expert_per_rank
     ).contiguous()
 
+    original_dtype = x_for_a2a.dtype
+    if force_float32:
+        all_to_all_dtype = torch.float32
+    else:
+        all_to_all_dtype = original_dtype
+
     output = torch.distributed.nn.functional.all_to_all_single(
-        torch.empty_like(x_for_a2a), x_for_a2a, group=ep_mesh.get_group()
-    )
+        torch.empty_like(x_for_a2a, dtype=all_to_all_dtype),
+        x_for_a2a.to(all_to_all_dtype),
+        group=ep_group,
+    ).to(original_dtype)
 
     # Rearrange output to the correct final shape
     # Each rank now gets expert_per_rank experts, each with tokens from all ep_size ranks
@@ -98,11 +109,13 @@ def dispatch_tokens(x, ep_size, ep_mesh, tokens_per_expert):
         output, "ep (er t) d -> er (ep t) d", er=expert_per_rank, t=max_tokens
     )
 
+    torch.distributed.barrier(ep_group)
+
     # Return both the output tensor and the token distribution information
     return output, all_tokens_per_expert
 
 
-def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
+def combine_tokens(x, ep_mesh, ep_size, all_tokens_per_expert, force_float32=False):
     """
     Combine tokens from different ranks back to their original experts.
     This is the inverse operation of dispatch_tokens.
@@ -117,6 +130,7 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
     Returns:
         output: Tensor of shape (num_experts, tokens_per_expert, dim_in) - flattened tokens
     """
+    ep_size = 1 if ep_mesh is None else ep_mesh.size()
     expert_per_rank, tokens_per_all_ranks, dim_in = x.shape
     total_experts = expert_per_rank * ep_size
     max_tokens_per_expert = tokens_per_all_ranks // ep_size
@@ -129,15 +143,25 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
             if n > 0:
                 output_chunks.append(x[i, :n])
         return torch.cat(output_chunks, dim=0)  # shape: [total_routed_tokens, dim]
+
+    ep_group = ep_mesh.get_group()
     # Rearrange to prepare for all-to-all communication
     x_for_a2a = rearrange(
         x, "er (ep t) d -> ep (er t) d", ep=ep_size, t=max_tokens_per_expert
     ).contiguous()
 
     # Perform all-to-all communication
+    original_dtype = x_for_a2a.dtype
+    if force_float32:
+        all_to_all_dtype = torch.float32
+    else:
+        all_to_all_dtype = original_dtype
+
     output_a2a = torch.distributed.nn.functional.all_to_all_single(
-        torch.empty_like(x_for_a2a), x_for_a2a, group=ep_mesh.get_group()
-    )
+        torch.empty_like(x_for_a2a, dtype=all_to_all_dtype),
+        x_for_a2a.to(all_to_all_dtype),
+        group=ep_group,
+    ).to(original_dtype)
 
     # Rearrange to get experts back in their original form
     # (num_experts, max_tokens_per_expert, dim_in)
@@ -147,7 +171,7 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
 
     # Get the actual number of tokens for each expert in this rank
     # We use the slice corresponding to the current rank
-    rank = torch.distributed.get_rank(group=ep_mesh.get_group())
+    rank = torch.distributed.get_rank(group=ep_group)
     tokens_per_expert = all_tokens_per_expert[rank]
 
     # Calculate total tokens to allocate the output tensor
@@ -160,5 +184,5 @@ def combine_tokens(x, ep_size, ep_mesh, all_tokens_per_expert):
             output_chunks.append(experts_output[i, :num_tokens])
 
     flattened_output = torch.cat(output_chunks, dim=0)
-
+    torch.distributed.barrier(ep_group)
     return flattened_output

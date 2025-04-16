@@ -515,7 +515,9 @@ def build_optimizers(
         mesh_dim_names = extra_kwargs["world_mesh"].mesh_dim_names
         ep_enable = "dp_shard_1" in mesh_dim_names or "dp_shard_2" in mesh_dim_names
         if ep_enable:
-            fused = False
+            fused, foreach = False, False
+            # Because for Expert Parallel, we have two different device meshes.
+
         width_multiplier = job_config.model.mup_width_multiplier
         # TODO Remove this deprecation handling at some point. Added on 2025-04-10.
         if "-multiplier-" in job_config.model.flavor:

@@ -20,6 +20,7 @@ from torchtitan.tools.logging import logger
 from .SeparateParamsGroupedExperts import SeparateParamsGroupedExperts
 from .GroupedExperts import GroupedExperts
 from . import ep_comm
+from .moe_utils import calc_gate_scaling_factor
 
 experts_impl_dict = {
     "separate": SeparateParamsGroupedExperts,
@@ -76,6 +77,9 @@ class MoEModelArgs(BaseModelArgs):
     activate_experts: int = 0
     moe_gate_bias_update_speed: float = 0.001
     moe_aux_loss_alpha: float = 0.001
+    moe_routed_scaling_factor = (
+        None  # dpskv3 2.5, moonlight 2.446, set None to auto-compute
+    )
     moe_gate_use_bias_for_routing: bool = True
     experts_impl: str = (
         "group"  # "group" or "separate", separate-params works with muon for now
@@ -156,13 +160,19 @@ class Gate(nn.Module):
     _accumulated_adjustment: torch.Tensor
 
     def __init__(
-        self, hidden_size: int, experts=8, topk=2, bias=True, bias_update_speed=0.01
+        self,
+        hidden_size: int,
+        experts=8,
+        topk=2,
+        bias=True,
+        bias_update_speed=0.001,
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
 
         self.topk = topk
         self.experts = experts
-        self.expert_embeddings = nn.Parameter(torch.randn(experts, hidden_size))
+        self.expert_embeddings = nn.Parameter(torch.zeros(experts, hidden_size))
         # Expert embeddings
 
         if bias and experts > 1:
@@ -170,6 +180,7 @@ class Gate(nn.Module):
         else:
             self.bias = None
 
+        self.routed_scaling_factor = routed_scaling_factor
         # Bias for load balancing
         self.bias_update_speed = bias_update_speed
         # Step size for updating bias dynamically
@@ -198,11 +209,10 @@ class Gate(nn.Module):
         if self.bias is not None:
             nn.init.zeros_(self.bias)
 
-    def forward(self, x: torch.Tensor, update_bias: bool = False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Input tensor of shape (B*S, D)
-            update_bias: Whether to accumulate bias adjustments (only during training)
         Returns:
             weights: Normalized routing weights
             indices: Selected expert indices
@@ -212,19 +222,26 @@ class Gate(nn.Module):
         scores = x @ self.expert_embeddings.T
         scores = torch.sigmoid(scores.to(torch.float32))
 
+        # Optionally add bias before top-k selection
         if self.bias is not None:
-            top_values, indices = torch.topk(scores + self.bias, self.topk, dim=-1)
-        else:
-            top_values, indices = torch.topk(scores, self.topk, dim=-1)
+            biased_scores = scores + self.bias
+
+        # Select top-k experts
+        top_values, indices = torch.topk(biased_scores, self.topk, dim=-1)
+
+        token_counts = torch.bincount(indices.view(-1), minlength=4)
 
         # Extract and normalize weights
         weights = scores.gather(-1, indices)
         weights = weights / weights.sum(dim=-1, keepdim=True)
 
-        if update_bias and self.bias is not None:
+        # Apply route scaling
+        weights = weights * self.routed_scaling_factor
+
+        if self.training and self.bias is not None:
             self.accumulate_adjustment(indices)
 
-        return weights.type_as(x), indices, scores
+        return weights, indices, scores
 
     def accumulate_adjustment(self, indices: torch.Tensor):
         """
@@ -261,6 +278,7 @@ class Gate(nn.Module):
                 # Calculate and apply adjustment
                 avg_usage = self._accumulated_adjustment / self.experts
                 load_error = avg_usage - self._accumulated_adjustment
+
                 adjustment = torch.sign(load_error) * self.bias_update_speed
 
                 if isinstance(self.bias.data, DTensor):
@@ -321,6 +339,7 @@ class MoE(nn.Module):
         bias_update_speed: float = 0.001,  # Bias adjustment speed
         aux_loss_alpha: float = 0.001,  # Small weight for sequence-wise auxiliary loss
         experts_impl: str = "group",  # "group" or "separate"
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
         """
@@ -356,6 +375,7 @@ class MoE(nn.Module):
             topk=activate_experts,
             bias=use_bias_for_routing,
             bias_update_speed=bias_update_speed,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         experts_impl_cls = experts_impl_dict[experts_impl]
@@ -417,7 +437,7 @@ class MoE(nn.Module):
 
         if self.topk > 0:
             # (B*S, K), (B*S, K)
-            weights, indices, scores = self.gate(x, update_bias=self.training)
+            weights, indices, scores = self.gate(x)
 
             with torch.no_grad():
                 # [seq_len, n_routed_experts]
@@ -430,20 +450,23 @@ class MoE(nn.Module):
                 sorted_tokens_shape = idxs.shape + x.shape[1:]
 
             sorted_tokens = x[idxs // indices.shape[1]]
+
             experts_input, all_tokens_per_expert = ep_comm.dispatch_tokens(
                 sorted_tokens,
-                self.experts.ep_size,
                 self.experts.ep_mesh,
+                self.experts.ep_size,
                 tokens_per_expert,
+                force_float32=False,
             )
 
             experts_output = self.experts(experts_input)
 
             routed_output = ep_comm.combine_tokens(
                 experts_output,
-                self.experts.ep_size,
                 self.experts.ep_mesh,
+                self.experts.ep_size,
                 all_tokens_per_expert,
+                force_float32=False,
             )
 
             # Map back from sorted tokens to original positions
@@ -452,7 +475,9 @@ class MoE(nn.Module):
             # Apply weights
             expert_weights = weights.view(-1)[idxs].unsqueeze(1)
             weighted_outputs = routed_output * expert_weights
-            out.index_add_(0, original_token_indices, weighted_outputs)
+            out.index_add_(
+                0, original_token_indices, weighted_outputs.to(routed_output.dtype)
+            )
 
         # Apply shared experts if they exist
         if self.shared_experts is not None:
@@ -508,10 +533,8 @@ class MoE(nn.Module):
         )
         f_i = f_i / (B * S * topk + eps)  # Eq. (18)
 
-        # Compute normalized expert probabilities P_i
-        norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(
-            min=eps
-        )  # Eq. (19)
+        # Eq. (19) Compute normalized expert probabilities P_i
+        norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(min=eps)
 
         # Compute mean score per expert across all tokens
         P_i = torch.zeros(N_r, device=scores.device, dtype=scores.dtype)
@@ -560,6 +583,20 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         self.attention = self.attention_cls(model_args)
+
+        if model_args.moe_routed_scaling_factor is None:
+            routed_scaling_factor = calc_gate_scaling_factor(
+                model_args.n_routed_experts,
+                model_args.activate_experts,
+                iter_times=10_000,
+            )
+            if layer_id == 0:
+                logger.info(
+                    f"Auto-computed routed_scaling_factor: {routed_scaling_factor}"
+                )
+        else:
+            routed_scaling_factor = model_args.moe_routed_scaling_factor
+
         self.feed_forward = self.feed_forward_cls(
             dim=model_args.dim,
             multiple_of=model_args.multiple_of,
@@ -572,6 +609,7 @@ class TransformerBlock(nn.Module):
             aux_loss_alpha=model_args.moe_aux_loss_alpha,
             match_dim_with_dense=True,
             experts_impl=model_args.experts_impl,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         self.layer_id = layer_id
