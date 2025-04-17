@@ -372,7 +372,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
     def save_job_config(self):
-        if os.environ["RANK"] == 0:
+        if os.environ["RANK"] == '0':
             # Save job config to dump folder.
             os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
             job_config_save_path = os.path.join(
