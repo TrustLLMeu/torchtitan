@@ -1,4 +1,3 @@
-import tempfile
 from typing import Dict, List, Optional
 
 from torchtitan.components.tokenizer import Tokenizer
