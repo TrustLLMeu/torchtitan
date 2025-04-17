@@ -532,6 +532,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
+        bias_list = None
         if (
             parallel_dims.dp_replicate_enabled
             or parallel_dims.dp_shard_enabled
@@ -553,8 +554,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 for m_name, m in model_parts[0].named_modules():
                     if "feed_forward.gate" in m_name and m.bias is not None:
                         bias_list.append(m.bias)
-            else:
-                bias_list = None
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()

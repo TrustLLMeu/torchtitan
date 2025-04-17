@@ -511,7 +511,10 @@ def build_optimizers(
         foreach = optim_implementation == "foreach"
 
         mesh_dim_names = extra_kwargs["world_mesh"].mesh_dim_names
-        ep_enable = "dp_shard_1" in mesh_dim_names or "dp_shard_2" in mesh_dim_names
+        ep_enable = (
+            mesh_dim_names is not None
+            and ("dp_shard_1" in mesh_dim_names or "dp_shard_2" in mesh_dim_names)
+        )
         if ep_enable:
             # Because for Expert Parallel, we have two different device meshes.
             fused, foreach = False, False
