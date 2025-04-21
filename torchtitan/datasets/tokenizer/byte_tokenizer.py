@@ -1,5 +1,3 @@
-from typing import Dict, List, Optional
-
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
@@ -14,7 +12,7 @@ class ByteTokenizer(Tokenizer):
             beginning-of-sequence token.
         eos_token (str): String to use for representing the
             end-of-sequence token.
-        special_tokens (Optional[List[str]]): optional list of
+        special_tokens (list[str] | None): optional list of
             additional tokens to add
     """
 
@@ -24,7 +22,7 @@ class ByteTokenizer(Tokenizer):
             self,
             bos_token: str = "〈BOS〉",
             eos_token: str = "〈EOS〉",
-            special_tokens: Optional[List[str]] = None,
+            special_tokens: list[str] | None = None,
     ):
         super().__init__()
 
@@ -61,7 +59,7 @@ class ByteTokenizer(Tokenizer):
             f"EOS ID {self.eos_id}"
         )
 
-    def encode(self, text: str, *, bos: bool, eos: bool) -> List[int]:
+    def encode(self, text: str, *, bos: bool, eos: bool) -> list[int]:
         """
         Encodes a string into a list of token IDs.
 
@@ -71,7 +69,7 @@ class ByteTokenizer(Tokenizer):
             eos (bool): Whether to append the end-of-sequence token.
 
         Returns:
-            List[int]: A list of token IDs.
+            list[int]: A list of token IDs.
         """
         # This always byte-tokenizes even sequences that would result in
         # special tokens. This means it's impossible to obtain special
@@ -83,12 +81,12 @@ class ByteTokenizer(Tokenizer):
             tokens.append(self.eos_id)
         return tokens
 
-    def decode(self, tokens: List[int]) -> str:
+    def decode(self, tokens: list[int]) -> str:
         """
         Decodes a list of token IDs into a string.
 
         Args:
-            t (List[int]): The list of token IDs to be decoded.
+            t (list[int]): The list of token IDs to be decoded.
 
         Returns:
             str: The decoded string.
@@ -109,11 +107,11 @@ class ByteTokenizer(Tokenizer):
         return "".join(text_parts)
 
     @property
-    def vocab(self) -> Dict[str, int]:
+    def vocab(self) -> dict[str, int]:
         return self._vocab
 
     @property
-    def inv_vocab(self) -> Dict[int, str]:
+    def inv_vocab(self) -> dict[int, str]:
         return self._inv_vocab
 
 
