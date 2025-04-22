@@ -87,14 +87,20 @@ class FlexAttention(torch.nn.Module):
     ) -> None:
         # batch is [b, s, h, d] shape
         for attn_mask_type in FlexAttention.used_attn_mask_types:
+            seq_len = batch.shape[1]
+            use_cached_mask = start_pos >= 0 and seq_len > 1
+
             match attn_mask_type:
                 case "causal":
-                    if FlexAttention.block_masks.get(attn_mask_type, None) is not None:
+                    if (
+                            start_pos < 0
+                            and FlexAttention.block_masks.get(attn_mask_type, None) is not None
+                    ):
                         continue
                     # We don't care about batch dimension --
                     # all samples have the same lower triangle mask.
                     batch_dimension = 1
-                    if start_pos >= 0:
+                    if use_cached_mask:
                         mask_fn = FlexAttention._get_cached_causal_mask_fn(start_pos)
                     else:
                         mask_fn = FlexAttention._get_causal_mask_fn()
@@ -110,13 +116,12 @@ class FlexAttention(torch.nn.Module):
                 case _:
                     raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
 
-            seq_len = batch.shape[1]
             block_mask = FlexAttention.compiled_create_block_mask(
                 mask_fn,
                 batch_dimension,
                 None,
                 seq_len,
-                seq_len + (start_pos if start_pos >= 0 else 0),
+                seq_len,
             )
             FlexAttention.block_masks[attn_mask_type] = block_mask
 
