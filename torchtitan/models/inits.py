@@ -2,7 +2,8 @@ import functools
 from typing import Optional
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate
+import torch.distributed as dist
+from torch.distributed.tensor import DTensor, distribute_tensor
 import torch.nn as nn
 
 INIT_FN_TYPES = ["trunc_normal", "normal", "orthogonal", "scion_normal"]
@@ -28,26 +29,34 @@ def _wrap_ignore_generator(fn):
     return wrapped_fn
 
 
-def orthogonal_(params, gain: float = 1.0, generator: Optional[torch.Generator] = None):
-    if not isinstance(params.data, DTensor):
-        return nn.init.orthogonal_(params, gain=gain, generator=generator)
-    else:
-        temp_tensor = torch.empty(params.shape)  # full shape
-        torch.nn.init.orthogonal_(temp_tensor, gain=gain, generator=generator)
+def orthogonal_(param, gain: float = 1.0, generator: Optional[torch.Generator] = None):
+    with torch.no_grad():
+        if not isinstance(param.data, DTensor):
+            return nn.init.orthogonal_(param, gain=gain, generator=generator)
 
-        # Create a replicated DTensor
-        replicated = DTensor.from_local(
-            temp_tensor,
-            placements=[Replicate()] * params.device_mesh.ndim,
-            device_mesh=params.device_mesh,
+        # rank 0 makes the full tensor
+        full_shape = tuple(param.shape)
+        device = param.device
+        if dist.get_rank() == 0:
+            temp = torch.empty(full_shape, device=device)
+            nn.init.orthogonal_(temp, gain=gain, generator=generator)
+        else:
+            # allocate an uninitialized placeholder
+            temp = torch.empty(full_shape, device=device)
+
+        # broadcast the full tensor from rank 0 to everyone
+        dist.broadcast(temp, src=0)
+
+        # shard it into a DTensor matching param’s placements/device_mesh
+        local_shard = distribute_tensor(
+            temp,
+            placements=param.placements,
+            device_mesh=param.device_mesh
         )
 
-        # Reshard to match original dtensor's placement
-        resharded = replicated.redistribute(placements=params.placements)
-
-        # Copy values to original dtensor
-        params.copy_(resharded)
-        return params
+        # copy into the parameter
+        param.data.copy_(local_shard)
+        return param
 
 
 def scion_normal_(
