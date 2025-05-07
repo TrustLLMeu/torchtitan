@@ -3,7 +3,6 @@ import math
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 from torch.distributed.tensor import DTensor, distribute_tensor
 import torch.nn as nn
 
@@ -39,32 +38,19 @@ def _wrap_ignore_generator(fn):
 
 
 def orthogonal_(param, gain: float = 1.0, generator: Optional[torch.Generator] = None):
+    if not isinstance(param.data, DTensor):
+        return nn.init.orthogonal_(param, gain=gain, generator=generator)
+
     with torch.no_grad():
-        if not isinstance(param.data, DTensor):
-            return nn.init.orthogonal_(param, gain=gain, generator=generator)
+        temp_tensor = torch.empty(param.shape, device=param.device)  # full shape
+        torch.nn.init.orthogonal_(temp_tensor, gain=gain, generator=generator)
 
-        # rank 0 makes the full tensor
-        full_shape = tuple(param.shape)
-        device = param.device
-        if dist.get_rank() == 0:
-            temp = torch.empty(full_shape, device=device)
-            nn.init.orthogonal_(temp, gain=gain, generator=generator)
-        else:
-            # allocate an uninitialized placeholder
-            temp = torch.empty(full_shape, device=device)
-
-        # broadcast the full tensor from rank 0 to everyone
-        dist.broadcast(temp, src=0)
-
-        # shard it into a DTensor matching param’s placements/device_mesh
-        local_shard = distribute_tensor(
-            temp,
-            placements=param.placements,
-            device_mesh=param.device_mesh
+        params_data = distribute_tensor(
+            temp_tensor, placements=param.placements, device_mesh=param.device_mesh,
         )
 
-        # copy into the parameter
-        param.data.copy_(local_shard)
+        # Copy values to original `DTensor`
+        param.copy_(params_data)
         return param
 
 
