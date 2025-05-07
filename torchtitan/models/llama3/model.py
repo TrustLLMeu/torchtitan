@@ -38,9 +38,10 @@ class TransformerModelArgs(BaseModelArgs):
     rope_theta: float = 10000
 
     max_seq_len: int = 2048
-    # If `True`, then each transformer block init uses its layer ID, and if
-    # `False`, each uses the total number of transformer blocks
-    depth_init: bool = True
+    # If `True`, then each transformer block init uses its layer ID, and
+    # if `False`, each uses the total number of transformer blocks. If
+    # `None`, do not apply any depth scaling.
+    depth_init: Optional[bool] = True
     first_in_init_fn_type: str = "normal"
     first_in_init_std: float = 1.0
     # Exponent applied to the first input layer's input dimensionality
@@ -487,7 +488,9 @@ class TransformerBlock(nn.Module):
             model_args.intermediate_init_std
             * model_args.dim ** model_args.intermediate_exp
         )
-        if model_args.depth_init:
+        if model_args.depth_init is None:
+            self.residual_div = 1.0
+        elif model_args.depth_init:
             self.residual_div = (2 * (self.layer_id + 1)) ** 0.5
         else:
             self.residual_div = (2 * self.num_layers) ** 0.5
