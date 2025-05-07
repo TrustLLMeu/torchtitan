@@ -90,8 +90,9 @@ class DistributedScion(torch.optim.Optimizer):
             and "dp_shard_0" in mesh_dim_names
         )
         print(
-            f"Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained})"
-            f" is enabled with world_mesh={world_mesh} | fsdp_enabled={self.fsdp_enabled} | expert_enabled={self.expert_enabled}"
+            f"Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained}) "
+            f"is enabled with world_mesh={world_mesh} | fsdp_enabled={self.fsdp_enabled} "
+            f"| expert_enabled={self.expert_enabled}"
         )
 
         super().__init__(params, defaults)
@@ -130,13 +131,25 @@ class DistributedScion(torch.optim.Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-
+        sgd_params = []
         ddp_params = []
         fsdp_params = []
         expert_params = []
 
         for group in self.param_groups:
             for p in group["params"]:
+                param_kwargs = self.groups_info[self.paramters_to_groups[id(p)]][-1]
+                norm_factor = param_kwargs["norm_factor"]
+                backend = param_kwargs["zeropower_backend"]
+                is_embed_norm = (
+                    norm_factor.startswith("embed")
+                    or norm_factor.startswith("unembed")
+                )
+
+                if backend is zeropower_backends["identity"] and is_embed_norm:
+                    sgd_params.append(p)
+                    continue
+
                 param_type = get_param_type(p, self.fsdp_enabled, self.expert_enabled)
                 if param_type == ParamType.DDP:
                     ddp_params.append(p)
@@ -151,6 +164,7 @@ class DistributedScion(torch.optim.Optimizer):
 
         fsdp_params.sort(key=lambda x: x.numel(), reverse=True)
         expert_params.sort(key=lambda x: (x.numel(), x.shape[1]), reverse=True)
+        self.step_sgd(sgd_params)
         self.step_ddp(ddp_params)
         self.step_expert(expert_params)
         self.step_fsdp(fsdp_params)
@@ -161,18 +175,20 @@ class DistributedScion(torch.optim.Optimizer):
         # NB: make sure this function does not modify the grad inplace
         #     since it is also called during the log of gradients
         # g = zeropower_backend(g, steps=backend_steps, eps=eps)
-        if g.ndim == 2:
+        def _lmo_for_2d_tensor(g):
             g = zeropower_backend(g, steps=backend_steps, eps=eps)
-        else:
+            g = self.normalise_grad(g, norm_factor=norm_factor, eps=eps)
+            return g
+
+        if g.ndim == 2:
+            g = _lmo_for_2d_tensor(g)
+        elif g.ndim == 3:
             g = torch.stack(
-                [
-                    zeropower_backend(g[i], steps=backend_steps, eps=eps)
-                    for i in range(g.shape[0])
-                ],
+                [_lmo_for_2d_tensor(g[i]) for i in range(g.shape[0])],
                 dim=0,
             )
-
-        g = self.normalise_grad(g, norm_factor=norm_factor, eps=eps)
+        else:
+            raise ValueError(f"Unknown grad shape: {g.shape}")
 
         return g
 
@@ -253,6 +269,25 @@ class DistributedScion(torch.optim.Optimizer):
                 p.data.to_local().add_(u, alpha=-lr)
             else:
                 p.data.add_(u, alpha=-lr)
+
+            if momentum != 1 and self.is_light:
+                raise NotImplementedError("Scion-light is not ready yet")
+                p.grad.mul_(1 - momentum)
+
+    def step_sgd(self, sgd_params):
+        if len(sgd_params) == 0:
+            return
+
+        for param_idx in range(len(sgd_params)):
+            p = sgd_params[param_idx]
+            lr, nesterov, momentum, param_kwargs = self.groups_info[self.paramters_to_groups[id(p)]]
+            g = self.update_momentum_via_nestroev(p, nesterov, momentum)
+
+            u = self.lmo(g.to_local(), **param_kwargs)
+
+            if not self.is_unconstrained:
+                p.data.to_local().mul_(1 - lr)
+            p.data.to_local().add_(u, alpha=-lr)
 
             if momentum != 1 and self.is_light:
                 raise NotImplementedError("Scion-light is not ready yet")
