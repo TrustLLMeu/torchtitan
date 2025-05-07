@@ -6,7 +6,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor, distribute_tensor
 import torch.nn as nn
 
-INIT_FN_TYPES = ["trunc_normal", "normal", "orthogonal", "scion_normal"]
+INIT_FN_TYPES = ["trunc_normal", "normal", "orthogonal", "scaled_orthogonal", "scion_normal"]
 
 
 # Deliberately throw away `mean` and `std` arguments.
@@ -59,6 +59,26 @@ def orthogonal_(param, gain: float = 1.0, generator: Optional[torch.Generator] =
         return param
 
 
+def scaled_orthogonal_(param, gain: float = 1.0, generator: Optional[torch.Generator] = None):
+    """
+    Note:
+        Be aware that ``fan_in`` and ``fan_out`` are calculated assuming
+        that the weight matrix is used in a transposed manner,
+        (i.e., ``x @ w.T`` in ``Linear`` layers, where ``w.shape = [fan_out, fan_in]``).
+        This is important for correct initialization.
+        If you plan to use ``x @ w``, where ``w.shape = [fan_in, fan_out]``,
+        pass in a transposed weight matrix, i.e. ``nn.init.xavier_uniform_(w.T, ...)``.
+    """
+    with torch.no_grad():
+        assert param.ndim == 2, \
+            "Fan in and fan out can not be computed for tensor with other than 2 dimensions"
+        fan_out, fan_in = param.shape
+        scale = math.sqrt(fan_out / fan_in)
+        gain *= scale
+
+    return orthogonal_(param, gain, generator)
+
+
 def scion_normal_(
         tensor,
         mean: float = 0.0,
@@ -94,6 +114,14 @@ def build_init_fn(init_fn_type: str):
     """
     init_fn_type = init_fn_type.lower()  # Normalize to lowercase
 
+    def _wrap_orthogonal(fn):
+
+        @functools.wraps(fn)
+        def wrapped_fn(tensor, mean=None, std=1, *args, **kwargs):
+            return fn(tensor, gain=std, *args, **kwargs)
+
+        return wrapped_fn
+
     if init_fn_type == "trunc_normal":
         return nn.init.trunc_normal_
     elif init_fn_type == "normal":
@@ -101,16 +129,9 @@ def build_init_fn(init_fn_type: str):
     elif init_fn_type == "zeros":
         return _wrap_ignore_generator(_wrap_ignore_mean_std(nn.init.zeros_))
     elif init_fn_type == "orthogonal":
-
-        def _wrap_orthogonal(fn):
-
-            @functools.wraps(fn)
-            def wrapped_fn(tensor, mean=None, std=1, *args, **kwargs):
-                return fn(tensor, gain=std, *args, **kwargs)
-
-            return wrapped_fn
-
         return _wrap_orthogonal(orthogonal_)
+    elif init_fn_type == "scaled_orthogonal":
+        return _wrap_orthogonal(scaled_orthogonal_)
     elif init_fn_type == "scion_normal":
         return scion_normal_
     else:
