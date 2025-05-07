@@ -65,6 +65,7 @@ class TransformerModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+    pad_id: int = -1
 
     # Number of additional modules to insert for multi-token prediction.
     num_mtp_modules: int = 0
@@ -88,6 +89,16 @@ class TransformerModelArgs(BaseModelArgs):
             value = getattr(job_config.model, name)
             setattr(self, name, value)
         self.vocab_size = tokenizer.n_words
+        # `pad_id` is not part of the `Tokenizer` interface, so keep it
+        # optional.
+        if hasattr(tokenizer, "pad_id"):
+            self.pad_id = tokenizer.pad_id
+        else:
+            self.pad_id = -1
+        # Add an additional vocab element if we are explicitly
+        # supporting a pad token.
+        if self.pad_id >= 0:
+            self.vocab_size += 1
         if job_config.model.vocab_size_multiple_of:
             vocab_divisor = job_config.model.vocab_size_multiple_of
             self.vocab_size = int(
@@ -621,8 +632,15 @@ class Transformer(nn.Module, ModelProtocol):
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
         self.eos_id = model_args.eos_id
+        self.pad_id = model_args.pad_id
 
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.tok_embeddings = nn.Embedding(
+            # Add an additional embedding vector if we are explicitly
+            # supporting a pad token.
+            model_args.vocab_size,
+            model_args.dim,
+            padding_idx=self.pad_id if self.pad_id >= 0 else None,
+        )
 
         # TODO persistent should be set to false, since this buffer can be recomputed.
         # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
