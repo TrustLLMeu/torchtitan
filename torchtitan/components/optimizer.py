@@ -43,13 +43,13 @@ T = TypeVar("T", bound=Optimizer)
 
 @torch.no_grad()
 def spectral_norm(W):
-    assert W.ndim >= 2, "operator norm can only be applied to matrices"
+    assert W.ndim == 2, "operator norm can only be applied to matrices"
     return torch.linalg.norm(W.to(torch.float32), ord=2, dtype=torch.float32)
 
 
 @torch.no_grad()
 def l1_to_rms_norm(W):
-    assert W.ndim >= 2, "operator norm can only be applied to matrices"
+    assert W.ndim == 2, "operator norm can only be applied to matrices"
     norm = torch.max(torch.linalg.norm(W.to(torch.float32), ord=2, dim=0, dtype=torch.float32))
     scale = torch.sqrt(torch.tensor(W.shape[0], dtype=W.dtype, device=W.device))
     norm /= scale
@@ -58,7 +58,7 @@ def l1_to_rms_norm(W):
 
 @torch.no_grad()
 def rms_to_l1_norm(W):
-    assert W.ndim >= 2, "operator norm can only be applied to matrices"
+    assert W.ndim == 2, "operator norm can only be applied to matrices"
     norm = torch.max(torch.linalg.norm(W.to(torch.float32), ord=2, dim=1, dtype=torch.float32))
     scale = torch.sqrt(torch.tensor(W.shape[1], dtype=W.dtype, device=W.device))
     norm *= scale
@@ -72,7 +72,7 @@ def supremum_norm(x):
 
 @torch.no_grad()
 def condition_number(W):
-    assert W.ndim >= 2, "condition number calculation can only be applied to matrices"
+    assert W.ndim == 2, "condition number calculation can only be applied to matrices"
     return torch.linalg.cond(W.to(torch.float32), p=2)
 
 
