@@ -242,7 +242,15 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class KVCache(nn.Module):
-    def __init__(self, batch_size, seq_length, n_kv_heads, head_dim, dtype, device):
+    def __init__(
+            self,
+            batch_size: int,
+            seq_length: int,
+            n_kv_heads: int,
+            head_dim: int,
+            dtype: torch.dtype,
+            device: torch.device,
+    ):
         super().__init__()
         cache_shape = (batch_size, seq_length, n_kv_heads, head_dim)
         self.register_buffer(
