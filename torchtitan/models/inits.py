@@ -38,10 +38,10 @@ def _wrap_ignore_generator(fn):
 
 
 def orthogonal_(param, gain: float = 1.0, generator: Optional[torch.Generator] = None):
-    if not isinstance(param.data, DTensor):
-        return nn.init.orthogonal_(param, gain=gain, generator=generator)
-
     with torch.no_grad():
+        if not isinstance(param.data, DTensor):
+            return nn.init.orthogonal_(param, gain=gain, generator=generator)
+
         temp_tensor = torch.empty(param.shape, device=param.device)  # full shape
         torch.nn.init.orthogonal_(temp_tensor, gain=gain, generator=generator)
 
