@@ -46,6 +46,12 @@ llama3_args = {
         n_layers=16,
         n_heads=4,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 55M parameters
     "debugmodel-multiplier-2": TransformerModelArgs(
@@ -53,6 +59,12 @@ llama3_args = {
         n_layers=16,
         n_heads=8,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 206M parameters
     "debugmodel-multiplier-4": TransformerModelArgs(
@@ -60,6 +72,12 @@ llama3_args = {
         n_layers=16,
         n_heads=16,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 824M parameters
     "debugmodel-multiplier-8": TransformerModelArgs(
@@ -67,6 +85,12 @@ llama3_args = {
         n_layers=16,
         n_heads=32,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 3.2B parameters
     "debugmodel-multiplier-16": TransformerModelArgs(
@@ -74,6 +98,12 @@ llama3_args = {
         n_layers=16,
         n_heads=64,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 1.9M parameters
     "debugmodel-2layers-multiplier-1": TransformerModelArgs(
@@ -81,6 +111,12 @@ llama3_args = {
         n_layers=2,
         n_heads=4,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 609M parameters
     "debugmodel-2layers-multiplier-4": TransformerModelArgs(
@@ -88,6 +124,12 @@ llama3_args = {
         n_layers=2,
         n_heads=16,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     # 2.4B parameters
     "debugmodel-2layers-multiplier-8": TransformerModelArgs(
@@ -95,12 +137,24 @@ llama3_args = {
         n_layers=2,
         n_heads=32,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "debugmodel-2layers-multiplier-16": TransformerModelArgs(
         dim=4096,
         n_layers=2,
         n_heads=64,
         n_kv_heads=None,
+        init_gate_as_residual=False,
+        multiple_of=256,
+        rope_theta=500000,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "8B": TransformerModelArgs(
         dim=4096,
