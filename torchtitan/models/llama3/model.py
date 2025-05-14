@@ -816,7 +816,14 @@ class Transformer(nn.Module, ModelProtocol):
         # TODO: We will to change forward() signature to allow tokens to
         # be always passed in.
         if self.model_args.use_flex_attn:
-            init_attention_mask(tokens, eos_id=self.eos_id, start_pos=start_pos)
+            init_attention_mask(
+                tokens,
+                eos_id=self.eos_id,
+                # Assume we'll never use padding if its token ID is
+                # negative.
+                pad_id=self.pad_id if self.pad_id >= 0 else None,
+                start_pos=start_pos,
+            )
         elif start_pos >= 0:
             raise ValueError("`start_pos >= 0`, but cannot use caching without FlexAttention")
 
