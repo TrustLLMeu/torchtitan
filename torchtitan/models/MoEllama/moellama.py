@@ -226,8 +226,6 @@ class Gate(nn.Module):
         # Select top-k experts
         top_values, indices = torch.topk(biased_scores, self.topk, dim=-1)
 
-        token_counts = torch.bincount(indices.view(-1), minlength=4)
-
         # Extract and normalize weights
         weights = scores.gather(-1, indices)
         weights = weights / weights.sum(dim=-1, keepdim=True)
@@ -273,7 +271,9 @@ class Gate(nn.Module):
                     self.needs_reduction.fill_(False)
 
                 # Calculate and apply adjustment
-                avg_usage = self._accumulated_adjustment / self.experts
+                total_usage = self._accumulated_adjustment.sum()
+                avg_usage = total_usage / self.experts
+
                 load_error = avg_usage - self._accumulated_adjustment
 
                 adjustment = torch.sign(load_error) * self.bias_update_speed
