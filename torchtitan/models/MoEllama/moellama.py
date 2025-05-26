@@ -491,7 +491,7 @@ class MoE(nn.Module):
 
             out = out + shared_output
 
-        if self.training and self.aux_loss_alpha > 0 and self.topk > 0:
+        if self.training:
             aux_loss = self.sequence_wise_aux_loss(indices, scores, bz, slen)
         else:
             aux_loss = torch.tensor(0.0, device=x.device)
@@ -506,59 +506,119 @@ class MoE(nn.Module):
 
     def sequence_wise_aux_loss(
         self,
-        indices: torch.Tensor,
-        scores: torch.Tensor,
-        B: int,
-        S: int,
+        indices: torch.Tensor,  # Shape (B*S, K_val), type long
+        scores: torch.Tensor,  # Shape (B*S, N_r_val), type float
+        B: int,  # Batch size
+        S: int,  # Sequence length
         eps: float = 1e-15,
-        force_flip: bool = False,
+        force_flip: bool = False,  # If True, clamps f_i^(b) and P_i^(b) to [0,1]
     ) -> torch.Tensor:
         """
         Computes the Sequence-Wise Auxiliary Loss as described in DeepSeekMoE.
 
         Args:
-            indices (torch.Tensor): Selected expert indices (B*S, K).
-            weights (torch.Tensor): Routing weights (B*S, K).
-            scores (torch.Tensor): Raw expert scores before top-k selection (B*S, N_r).
+            indices (torch.Tensor): Selected expert indices for each
+                token, flattened across batch and sequence.
+                Assumed to be of type long. Shape: (B*S, K_val).
+            scores (torch.Tensor): Raw expert scores (before top-k
+                selection and normalization) for each token and each
+                expert. Shape: (B*S, N_r_val).
             B (int): Batch size.
             S (int): Sequence length.
+            eps (float): Epsilon for numerical stability during score normalization.
+            force_flip (bool): Whether to clamp intermediate f_i^(b) and P_i^(b) terms to [0,1].
 
         Returns:
-            aux_loss (torch.Tensor): Computed sequence-wise auxiliary loss.
+            torch.Tensor: Computed sequence-wise auxiliary loss (scalar).
+
         """
 
-        N_r = self.n_routed_experts  # Total number of routed experts
-        topk = self.topk  # Number of experts per token
-        T = B * S
+        N_r = self.n_routed_experts  # Total number of routed experts (N_r in formulas)
+        K_val = self.topk  # Number of experts selected per token (K in formulas)
 
-        # Compute expert frequency f_i (fraction of tokens assigned to expert i)
-        f_i = torch.zeros(N_r, device=indices.device, dtype=scores.dtype)
-        flat_indices = indices.view(-1)  # (B*S*K)
-        f_i.scatter_add_(
-            0, flat_indices, torch.ones_like(flat_indices, dtype=scores.dtype)
-        )
-        f_i = N_r / (T * topk) * f_i  # Eq. (18)
+        # Conditional returns based on your original code's logic
+        # If topk == N_r, original code returned 0. This implies perfect load balancing by design.
+        if K_val == N_r and N_r > 0:
+            return torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
 
-        # Eq. (19) Compute normalized expert probabilities P_i
-        norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(min=eps)
+        # If not training, alpha is zero, or no experts are selected (K_val=0)
+        if not (self.aux_loss_alpha > 0 and K_val > 0):
+            return torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
 
-        # Compute mean score per expert across all tokens
-        P_i = torch.zeros(N_r, device=scores.device, dtype=scores.dtype)
-        for k in range(topk):
-            expert_idx = indices[:, k]  # (B*S,)
-            selected_scores = norm_scores.gather(1, expert_idx.unsqueeze(-1)).squeeze(
-                -1
-            )
-            P_i.scatter_add_(0, expert_idx, selected_scores)
+        # If batch or sequence length is zero, no tokens to process.
+        if B == 0 or S == 0:
+            return torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
 
-        P_i = P_i / T
+        # Normalize scores: p_{t,i} (for token t, expert i)
+        # scores shape: (B*S, N_r)
+        norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(
+            min=eps
+        )  # Shape: (B*S, N_r)
+
+        # Reshape for sequence-wise processing
+        # reshaped_indices shape: (B, S, K_val)
+        # reshaped_norm_scores shape: (B, S, N_r)
+        reshaped_indices = indices.view(B, S, K_val)
+        reshaped_norm_scores = norm_scores.view(B, S, N_r)
+
+        # 1. Compute f_i^(b) for all sequences b and experts i
+        # f_i^(b) = (N_r / (S * K_val)) * sum_{s_idx, k_idx} 1{expert i is idx_{b,s_idx,k_idx}}
+
+        # Create one-hot representation of selected expert indices
+        # one_hot_indices[b, s_idx, k_idx, expert_i] = 1 if expert_i was the k_idx-th choice for token (b,s_idx)
+        # Shape: (B, S, K_val, N_r)
+        one_hot_indices = torch.nn.functional.one_hot(reshaped_indices, num_classes=N_r)
+
+        # count_expert_selected_per_sequence[b, expert_i] = sum_{s_idx, k_idx} 1{...}
+        # Sum over sequence tokens (S) and K_val choices
+        count_expert_selected_per_sequence = one_hot_indices.sum(dim=[1, 2]).to(
+            scores.dtype
+        )  # Shape: (B, N_r)
+
+        # Denominator S * K_val is non-zero due to earlier checks (S > 0, K_val > 0)
+        f_i_b_all = (
+            N_r / (S * K_val)
+        ) * count_expert_selected_per_sequence  # Shape: (B, N_r)
+
+        # 2. Compute P_i^(b) for all sequences b and experts i
+        # P_i^(b) = (1/S) * sum_{s_idx, k_idx} p_{b,s_idx,expert_i} * 1{expert_i is idx_{b,s_idx,k_idx}}
+
+        # Create a mask: mask_expert_selected[b,s_idx,k_idx,expert_i] is True if expert_i was selected
+        # as k_idx-th choice for token (b,s_idx)
+        arange_N_r = torch.arange(N_r, device=indices.device).view(
+            1, 1, 1, N_r
+        )  # Shape: (1,1,1,N_r) for broadcasting
+        mask_expert_selected = (
+            reshaped_indices.unsqueeze(-1) == arange_N_r
+        )  # Shape: (B,S,K_val,N_r), boolean
+
+        # Expand norm_scores for broadcasting: p_{b,s_idx,expert_i}
+        reshaped_norm_scores_expanded = reshaped_norm_scores.unsqueeze(
+            2
+        )  # Shape: (B,S,1,N_r)
+
+        # Element-wise product: p_{b,s_idx,expert_i} if expert_i was chosen, 0 otherwise
+        # Product of float (norm_scores) and bool (mask) results in float.
+        term_to_sum_for_P = (
+            reshaped_norm_scores_expanded * mask_expert_selected
+        )  # Shape: (B,S,K_val,N_r)
+
+        # sum_val_P[b,expert_i] = sum_{s_idx,k_idx} (p_{b,s_idx,expert_i} * 1{...})
+        # Sum over sequence tokens (S) and K_val choices
+        sum_val_P = term_to_sum_for_P.sum(dim=[1, 2])  # Shape: (B, N_r)
+
+        # Denominator S is non-zero due to earlier checks (S > 0)
+        P_i_b_all = sum_val_P / S  # Shape: (B, N_r)
 
         if force_flip:
-            f_i = torch.clamp(f_i, min=0, max=1)
-            P_i = torch.clamp(P_i, min=0, max=1)
+            f_i_b_all = torch.clamp(f_i_b_all, min=0, max=1)
+            P_i_b_all = torch.clamp(P_i_b_all, min=0, max=1)
 
-        # Final auxiliary loss: L_bal = alpha * sum_i (f_i * P_i) -- Eq. (17)
-        aux_loss = (f_i * P_i).sum() * self.aux_loss_alpha
+        # 3. Compute sum_i f_i^(b) * P_i^(b)
+        loss_per_sequence = (f_i_b_all * P_i_b_all).sum(dim=1)
+
+        # 4. Final auxiliary loss:
+        aux_loss = loss_per_sequence.mean() * self.aux_loss_alpha
 
         return aux_loss
 
