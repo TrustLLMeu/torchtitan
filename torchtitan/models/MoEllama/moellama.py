@@ -44,6 +44,7 @@ class MoEModelArgs(BaseModelArgs):
     # Exponent applied to the first input layer's input dimensionality
     # to obtain its init std factor.
     first_in_exp: float = 0.0
+    router_init_fn_type: str = "trunc_normal"
     intermediate_init_fn_type: str = "trunc_normal"
     intermediate_init_std: float = 0.02
     # Exponent applied to the model's hidden dimensionality to obtain
@@ -82,6 +83,7 @@ class MoEModelArgs(BaseModelArgs):
                 "first_in_init_fn_type",
                 "first_in_init_std",
                 "first_in_exp",
+                "router_init_fn_type",
                 "intermediate_init_fn_type",
                 "intermediate_init_std",
                 "intermediate_exp",
@@ -196,8 +198,10 @@ class Gate(nn.Module):
     def __repr__(self):
         return f"Gate(experts={self.experts}, topk={self.topk}, bias={self.bias is not None})"
 
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.expert_embeddings)
+    def init_weights(self, init_std: float, init_fn_type: str):
+        # nn.init.xavier_uniform_(self.expert_embeddings)
+        init_fn = build_init_fn(init_fn_type)
+        init_fn(self.expert_embeddings, mean=0.0, std=init_std)
         if self.bias is not None:
             nn.init.zeros_(self.bias)
 
@@ -409,6 +413,7 @@ class MoE(nn.Module):
         residual_div: float,
         init_gate_as_residual: bool,
         init_fn_type: str,
+        router_init_fn_type: str,
     ):
         if self.experts is not None:
             self.experts.init_weights(
@@ -424,7 +429,7 @@ class MoE(nn.Module):
                 init_gate_as_residual=init_gate_as_residual,
                 init_fn_type=init_fn_type,
             )
-        self.gate.init_weights()
+        self.gate.init_weights(init_std, router_init_fn_type)
 
     def update_gate_bias(self):
         self.gate.update()
@@ -630,6 +635,7 @@ class TransformerBlock(nn.Module):
             model_args.intermediate_init_std
             * model_args.dim**model_args.intermediate_exp
         )
+        self.router_init_fn_type = model_args.router_init_fn_type
         if model_args.depth_init:
             self.residual_div = (2 * (self.layer_id + 1)) ** 0.5
         else:
@@ -675,6 +681,7 @@ class TransformerBlock(nn.Module):
             residual_div=self.residual_div,
             init_gate_as_residual=self.init_gate_as_residual,
             init_fn_type=self.weight_init_fn_type,
+            router_init_fn_type=self.router_init_fn_type,
         )
 
     def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
