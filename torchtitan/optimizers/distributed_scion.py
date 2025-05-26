@@ -96,12 +96,14 @@ class DistributedScion(torch.optim.Optimizer):
 
         self.is_unconstrained = is_unconstrained
         self.world_mesh = world_mesh
-        mesh_dim_names = world_mesh.mesh_dim_names
+        mesh_dim_names = world_mesh.mesh_dim_names if world_mesh is not None else None
         self.fsdp_enabled = (
-            "dp_shard" in mesh_dim_names or "dp_shard_1" in mesh_dim_names
+            mesh_dim_names is not None
+            and "dp_shard" in mesh_dim_names or "dp_shard_1" in mesh_dim_names
         )
         self.expert_enabled = (
             world_mesh is not None
+            and mesh_dim_names is not None
             and "dp_shard_1" in mesh_dim_names
             and "dp_shard_0" in mesh_dim_names
         )
