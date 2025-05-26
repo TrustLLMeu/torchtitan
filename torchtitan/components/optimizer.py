@@ -581,6 +581,7 @@ def build_optimizers(
         }
     elif is_scion:
         backend_steps = job_config.optimizer.backend_steps
+        zeropower_backend_algorithm = job_config.optimizer.zeropower_backend
         momentum = job_config.optimizer.momentum
         nesterov = job_config.optimizer.nesterov
         is_light = job_config.optimizer.is_light
@@ -594,7 +595,7 @@ def build_optimizers(
             "nesterov": nesterov,
             "eps": eps,
             "norm_factor": "spectral",
-            "backend": "newtonschulz5",
+            "backend": zeropower_backend_algorithm,
             "backend_steps": backend_steps,
         }
     else:
