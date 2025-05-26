@@ -573,10 +573,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             extra_metrics["loss_metrics/aux_loss"] = aux_loss
         if moe_entropy_per_layer is not None:
             for (k, v) in moe_entropy_per_layer.items():
-                extra_metrics[f"loss_metrics/moe_entropy_per_layer_{k}"] = v
+                extra_metrics[f"moe_entropy/moe_entropy_per_layer_{k}"] = v
         if bias_list is not None:
             for bias_i in range(len(bias_list)):
-                extra_metrics[f"model/bias_{bias_i}"] = bias_list[bias_i].mean()
+                extra_metrics[f"moe_bias/bias_{bias_i}"] = bias_list[bias_i].mean()
 
         color = self.metrics_processor.color
         extra_print_data = ""
