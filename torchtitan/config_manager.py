@@ -374,6 +374,13 @@ class JobConfig:
             help="Whether to use Scion's unconstrained version",
         )
         self.parser.add_argument(
+            "--optimizer.zeropower_backend",
+            type=str,
+            default="newtonschulz5",
+            choices=["newtonschulz5", "svd"],
+            help="Which zeropower_backend to use",
+        )
+        self.parser.add_argument(
             "--optimizer.backend_steps",
             type=int,
             default=5,
