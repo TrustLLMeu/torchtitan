@@ -5,7 +5,6 @@ from torch import nn
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from . import ep_comm
 from torchtitan.models.inits import build_init_fn
 
 
