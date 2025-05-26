@@ -506,6 +506,7 @@ class MoE(nn.Module):
         B: int,
         S: int,
         eps: float = 1e-15,
+        force_flip: bool = False,
     ) -> torch.Tensor:
         """
         Computes the Sequence-Wise Auxiliary Loss as described in DeepSeekMoE.
@@ -523,6 +524,7 @@ class MoE(nn.Module):
 
         N_r = self.n_routed_experts  # Total number of routed experts
         topk = self.topk  # Number of experts per token
+        T = B * S
 
         # Compute expert frequency f_i (fraction of tokens assigned to expert i)
         f_i = torch.zeros(N_r, device=indices.device, dtype=scores.dtype)
@@ -530,7 +532,7 @@ class MoE(nn.Module):
         f_i.scatter_add_(
             0, flat_indices, torch.ones_like(flat_indices, dtype=scores.dtype)
         )
-        f_i = f_i / (B * S * topk + eps)  # Eq. (18)
+        f_i = N_r / (T * topk) * f_i  # Eq. (18)
 
         # Eq. (19) Compute normalized expert probabilities P_i
         norm_scores = scores / scores.sum(dim=-1, keepdim=True).clamp(min=eps)
@@ -544,9 +546,11 @@ class MoE(nn.Module):
             )
             P_i.scatter_add_(0, expert_idx, selected_scores)
 
-        P_i = P_i / (B * S + eps)  # Eq. (20)
-        # f_i = torch.clamp(f_i, min=0, max=1)
-        # P_i = torch.clamp(P_i, min=0, max=1)
+        P_i = P_i / T
+
+        if force_flip:
+            f_i = torch.clamp(f_i, min=0, max=1)
+            P_i = torch.clamp(P_i, min=0, max=1)
 
         # Final auxiliary loss: L_bal = alpha * sum_i (f_i * P_i) -- Eq. (17)
         aux_loss = (f_i * P_i).sum() * self.aux_loss_alpha
