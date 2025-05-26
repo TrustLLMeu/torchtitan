@@ -75,6 +75,7 @@ class MoEModelArgs(BaseModelArgs):
     moe_routed_scaling_factor = None
     # dpskv3 2.5, moonlight 2.446, set None to auto-compute
     moe_gate_use_bias_for_routing: bool = True
+    moe_init_all_experts_same: bool = False
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         for name in [
@@ -335,6 +336,7 @@ class MoE(nn.Module):
         bias_update_speed: float = 0.001,  # Bias adjustment speed
         aux_loss_alpha: float = 0.001,  # Small weight for sequence-wise auxiliary loss
         routed_scaling_factor: float = 1.0,
+        moe_init_all_experts_same: bool = False,
     ):
         super().__init__()
         """
@@ -392,7 +394,10 @@ class MoE(nn.Module):
         # Routed Experts (only used when selected)
         if n_routed_experts > 0:
             self.experts = GroupedExperts(
-                dim_in=dim, dim_out=hidden_dim, num_experts=n_routed_experts
+                dim_in=dim,
+                dim_out=hidden_dim,
+                num_experts=n_routed_experts,
+                moe_init_all_experts_same=moe_init_all_experts_same,
             )
 
         else:
@@ -603,6 +608,7 @@ class TransformerBlock(nn.Module):
             aux_loss_alpha=model_args.moe_aux_loss_alpha,
             match_dim_with_dense=True,
             routed_scaling_factor=routed_scaling_factor,
+            moe_init_all_experts_same=model_args.moe_init_all_experts_same,
         )
 
         self.layer_id = layer_id
