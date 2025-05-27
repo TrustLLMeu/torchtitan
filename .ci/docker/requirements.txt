@@ -8,4 +8,4 @@ blobfile
 tabulate
 wandb
 fsspec
-toml
+tomli-w >= 1.1.0

@@ -13,7 +13,7 @@ import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
-import toml
+import tomli_w
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -383,7 +383,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with open(job_config_save_path, "w") as f:
                 json.dump(self.job_config.to_dict(), f, indent=4)
             with open(job_config_save_path.replace(".json", ".toml"), "w") as f:
-                toml.dump(self.job_config.to_dict(), f)
+                tomli_w.dump(self.job_config.to_dict(), f)
 
     def save_model_args(self, model_args: train_spec_module.BaseModelArgs):
         if torch.distributed.get_rank() == 0:
