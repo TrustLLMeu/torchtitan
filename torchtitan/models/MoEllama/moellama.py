@@ -76,7 +76,7 @@ class MoEModelArgs(BaseModelArgs):
     moe_routed_scaling_factor = None
     # dpskv3 2.5, moonlight 2.446, set None to auto-compute
     moe_gate_use_bias_for_routing: bool = True
-    moe_init_all_experts_same: bool = False
+    moe_init_all_experts_same: bool = True
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         for name in [
