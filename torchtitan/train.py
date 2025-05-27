@@ -498,14 +498,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if hasattr(model, "update_gate_bias"):
                 token_selection_per_layer = model.update_gate_bias()
 
-        # TODO(JSC): Scaled the EP's grad by 1/EP, we still need to scale expert's grad by 1/EP
-        # maybe we can move this to Expert Parallel as a grad hook[?] to make the
-        for model in model_parts:
-            for p_name, param in model.named_parameters():
-                if param.requires_grad and ".experts" in p_name:
-                    param.grad = param.grad / parallel_dims.ep
-
-        # TODO(JSC): disable gradient clipping for now for debugging
         # Adamw + EP seems does not work with gradient clipping
         grad_norm = None
         if self.job_config.training.max_norm > 0:

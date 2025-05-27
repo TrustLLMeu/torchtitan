@@ -132,8 +132,12 @@ def parallelize_llama(
                 dp_mod_ep_mesh_dim_names.append("dp_replicate")
             dp_mod_ep_mesh_dim_names.append("dp_shard_1")
 
+        # TODO(JSC): need to check EP's scale factor if TP is enabled
+        assert parallel_dims.tp == 1
+
         ep_enabled = parallel_dims.ep_mode == "naive_dp2ep" and parallel_dims.ep_enabled
 
+        loss_average_denominator = parallel_dims.loss_average_denominator
         apply_fsdp(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
@@ -144,6 +148,7 @@ def parallelize_llama(
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_enabled=ep_enabled,
             dp_mod_ep_mesh=world_mesh[tuple(dp_mod_ep_mesh_dim_names)],
+            loss_average_denominator=loss_average_denominator,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -427,6 +432,7 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_enabled: bool = False,
     dp_mod_ep_mesh: DeviceMesh | None = None,
+    loss_average_denominator: int = 1,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -478,6 +484,9 @@ def apply_fsdp(
                 reshard_after_forward=reshard_after_forward,
             )
 
+            transformer_block.feed_forward.experts.set_reduce_scatter_divide_factor(
+                loss_average_denominator,
+            )
         fully_shard(
             transformer_block,
             **fsdp_config,

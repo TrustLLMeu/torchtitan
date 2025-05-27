@@ -215,3 +215,7 @@ class ParallelDims:
     @cached_property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
+
+    @property
+    def loss_average_denominator(self) -> int:
+        return self.dp_replicate * self.dp_shard * self.cp
