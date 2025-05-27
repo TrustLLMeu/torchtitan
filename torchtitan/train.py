@@ -533,7 +533,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
-        bias_list = None
+        bias_dict = None
         if (
             parallel_dims.dp_replicate_enabled
             or parallel_dims.dp_shard_enabled
@@ -551,10 +551,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     k: dist_utils.dist_mean(v, world_mesh["dp_cp"])
                     for (k, v) in moe_entropy_per_layer.items()
                 }
-                bias_list = []
+                bias_dict = {}
                 for m_name, m in model_parts[0].named_modules():
                     if "feed_forward.gate" in m_name and m.bias is not None:
-                        bias_list.append(m.bias)
+                        _layer_id = m_name.split(".")[1]
+                        base_name = f"moe_bias/L-{_layer_id}_EP-"
+                        bias_dict.update(
+                            {
+                                f"{base_name}{i}": m.bias.detach()[i].mean()
+                                for i in range(m.bias.shape[0])
+                            }
+                        )
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -575,9 +582,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if moe_entropy_per_layer is not None:
             for (k, v) in moe_entropy_per_layer.items():
                 extra_metrics[f"moe_entropy/moe_entropy_per_layer_{k}"] = v
-        if bias_list is not None:
-            for bias_i in range(len(bias_list)):
-                extra_metrics[f"moe_bias/bias_{bias_i}"] = bias_list[bias_i].mean()
+        if bias_dict is not None:
+            extra_metrics.update(bias_dict)
 
         for layer_id, counts in token_selection_per_layer:
             total = sum(counts) or 1.0
