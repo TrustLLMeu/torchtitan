@@ -497,7 +497,10 @@ class MoE(nn.Module):
             aux_loss = torch.tensor(0.0, device=x.device)
 
         if self.topk > 0:
-            routing_entropy = -(weights * weights.log()).sum(dim=-1).mean()
+            correct_weights = weights.detach() / self.gate.routed_scaling_factor
+            routing_entropy = (
+                -(correct_weights * correct_weights.log()).sum(dim=-1).mean()
+            )
         else:
             routing_entropy = torch.tensor(0.0, device=x.device)
 
