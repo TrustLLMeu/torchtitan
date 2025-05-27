@@ -926,6 +926,14 @@ class JobConfig:
                 This will load the model only, excluding the specified keys.
             """,
         )
+        self.parser.add_argument(
+            "--checkpoint.reconfigure_lrs",
+            action="store_true",
+            help="""
+                Whether _not_ to load LRs from the checkpoint, but instead use those specified in
+                the current job's config.
+            """,
+        )
 
         # activation checkpointing configs
         self.parser.add_argument(
