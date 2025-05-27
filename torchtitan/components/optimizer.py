@@ -223,7 +223,11 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
 
     def zero_grad(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
-            if not (isinstance(optimizer, Scion) and optimizer.is_light and optimizer.use_momentum):
+            if not (
+                isinstance(optimizer, (Scion, DistributedScion))
+                and optimizer.is_light
+                and optimizer.use_momentum
+            ):
                 optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> dict[str, Any]:
