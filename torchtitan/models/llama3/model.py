@@ -61,6 +61,8 @@ class TransformerModelArgs(BaseModelArgs):
     final_out_exp: float = -0.5
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
+    # If this is True, it implies `qk_norm=True`.
+    norm_everywhere: bool = False
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
@@ -109,6 +111,7 @@ class TransformerModelArgs(BaseModelArgs):
                 f"Padded vocab size from {tokenizer.n_words} to {self.vocab_size}."
             )
         self.max_seq_len = job_config.training.seq_len
+        self.qk_norm = self.qk_norm or self.norm_everywhere
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams_not_ffn = 0
@@ -316,7 +319,8 @@ class Attention(nn.Module):
 
         self._kv_cache: Optional[KVCache] = None
 
-        self.qk_norm = model_args.qk_norm
+        self.qk_norm = model_args.qk_norm or model_args.norm_everywhere
+        self.norm_everywhere = model_args.norm_everywhere
         if self.qk_norm:
             self.q_norm = build_norm(
                 model_args.norm_type,
@@ -326,6 +330,17 @@ class Attention(nn.Module):
             self.k_norm = build_norm(
                 model_args.norm_type,
                 dim=self.head_dim,
+                eps=model_args.norm_eps,
+            )
+        if self.norm_everywhere:
+            self.v_norm = build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+            )
+            self.o_norm = build_norm(
+                model_args.norm_type,
+                dim=model_args.dim,
                 eps=model_args.norm_eps,
             )
 
@@ -379,6 +394,8 @@ class Attention(nn.Module):
         if self.qk_norm:
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)
+        if self.norm_everywhere:
+            xv = self.v_norm(xv)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
@@ -399,6 +416,8 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
+        if self.norm_everywhere:
+            output = self.o_norm(output)
         return self.wo(output)
 
 
@@ -411,6 +430,12 @@ class FeedForward(nn.Module):
         hidden_dim (int): Hidden dimension of the feedforward layer.
         multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
         ffn_dim_multiplier (Optional[float]): Custom multiplier for hidden dimension. Defaults to None.
+        norm_everywhere (bool): Whether to normalize the gating output.
+        norm_type (Optional[str]): Normalization function to use. Only
+            relevant and required, if `norm_everywhere=True`.
+        norm_eps (str): Numerical stability epsilon for normalization
+            layers. Only relevant and required, if
+            `norm_everywhere=True`.
 
     Attributes:
         w1 (Linear): Linear transformation for the first layer.
@@ -425,6 +450,9 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        norm_everywhere: bool = False,
+        norm_type: Optional[str] = None,
+        norm_eps: Optional[float] = None,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -437,8 +465,20 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
+        if norm_everywhere:
+            assert norm_type is not None, \
+                "`norm_type` needs to be passed when `norm_everywhere=True`"
+            assert norm_eps is not None, "`norm_eps` needs to be passed when `norm_everywhere=True`"
+            self.out_norm = build_norm(
+                norm_type,
+                dim=hidden_dim,
+                eps=norm_eps,
+            )
+        else:
+            self.out_norm = nn.Identity()
+
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(self.out_norm(F.silu(self.w1(x)) * self.w3(x)))
 
     def init_weights(
             self,
@@ -491,6 +531,9 @@ class TransformerBlock(nn.Module):
             hidden_dim=4 * model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            norm_type=model_args.norm_type,
+            norm_everywhere=model_args.norm_everywhere,
+            norm_eps=model_args.norm_eps,
         )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers

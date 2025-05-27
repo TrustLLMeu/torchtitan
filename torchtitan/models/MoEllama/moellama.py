@@ -59,6 +59,7 @@ class MoEModelArgs(BaseModelArgs):
     final_out_exp: float = -0.5
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
+    norm_everywhere: bool = False
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
@@ -107,6 +108,7 @@ class MoEModelArgs(BaseModelArgs):
                 f"Padded vocab size from {tokenizer.n_words} to {self.vocab_size}."
             )
         self.max_seq_len = job_config.training.seq_len
+        self.qk_norm = self.qk_norm or self.norm_everywhere
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams_not_ffn = 0
@@ -298,7 +300,13 @@ class Gate(nn.Module):
 
 class SharedExperts(nn.Module):
     def __init__(
-        self, dim: int, hidden_dim: int, activation: Callable = torch.nn.functional.silu
+        self,
+        dim: int,
+        hidden_dim: int,
+        activation: Callable = torch.nn.functional.silu,
+        norm_everywhere: bool = False,
+        norm_type: Optional[str] = None,
+        norm_eps: Optional[float] = None,
     ):
         super().__init__()
         self.gate_proj = nn.Linear(dim, hidden_dim, bias=False)
@@ -306,10 +314,22 @@ class SharedExperts(nn.Module):
         self.up_proj = nn.Linear(hidden_dim, dim, bias=False)
         self.act_fn = activation
 
+        if norm_everywhere:
+            assert norm_type is not None, \
+                "`norm_type` needs to be passed when `norm_everywhere=True`"
+            assert norm_eps is not None, "`norm_eps` needs to be passed when `norm_everywhere=True`"
+            self.out_norm = build_norm(
+                norm_type,
+                dim=dim,
+                eps=norm_eps,
+            )
+        else:
+            self.out_norm = nn.Identity()
+
     def forward(self, x):
         h = self.act_fn(self.gate_proj(x))
         h = h * self.down_proj(x)
-        out = self.up_proj(h)
+        out = self.out_norm(self.up_proj(h))
         return out
 
     def init_weights(
@@ -341,6 +361,9 @@ class MoE(nn.Module):
         aux_loss_alpha: float = 0.001,  # Small weight for sequence-wise auxiliary loss
         routed_scaling_factor: float = 1.0,
         moe_init_all_experts_same: bool = False,
+        norm_everywhere: bool = False,
+        norm_type: Optional[str] = None,
+        norm_eps: Optional[float] = None,
     ):
         super().__init__()
         """
@@ -390,7 +413,13 @@ class MoE(nn.Module):
             # self.shared_experts = GroupedExperts(
             #     dim_in=dim, dim_out=hidden_dim, num_experts=n_shared_experts
             # )
-            self.shared_experts = SharedExperts(dim, hidden_dim)
+            self.shared_experts = SharedExperts(
+                dim,
+                hidden_dim,
+                norm_everywhere=norm_everywhere,
+                norm_type=norm_type,
+                norm_eps=norm_eps,
+            )
 
         else:
             self.shared_experts = None
@@ -402,6 +431,9 @@ class MoE(nn.Module):
                 dim_out=hidden_dim,
                 num_experts=n_routed_experts,
                 moe_init_all_experts_same=moe_init_all_experts_same,
+                norm_everywhere=norm_everywhere,
+                norm_type=norm_type,
+                norm_eps=norm_eps,
             )
 
         else:
@@ -681,6 +713,9 @@ class TransformerBlock(nn.Module):
             match_dim_with_dense=True,
             routed_scaling_factor=routed_scaling_factor,
             moe_init_all_experts_same=model_args.moe_init_all_experts_same,
+            norm_everywhere=model_args.norm_everywhere,
+            norm_type=model_args.norm_type,
+            norm_eps=model_args.norm_eps,
         )
 
         self.layer_id = layer_id
