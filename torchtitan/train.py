@@ -411,7 +411,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 + ".json",
             )
             with open(job_config_save_path, "w") as f:
-                json.dump(self.job_config.to_dict(), f)
+                json.dump(self.job_config.to_dict(), f, indent=4)
 
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config
