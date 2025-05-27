@@ -487,9 +487,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
         # for MoE model, update the gate bias
+        token_selection_per_layer = []
         for model in model_parts:
             if hasattr(model, "update_gate_bias"):
-                model.update_gate_bias()
+                token_selection_per_layer = model.update_gate_bias()
 
         # TODO(JSC): Scaled the EP's grad by 1/EP, we still need to scale expert's grad by 1/EP
         # maybe we can move this to Expert Parallel as a grad hook[?] to make the
@@ -577,6 +578,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if bias_list is not None:
             for bias_i in range(len(bias_list)):
                 extra_metrics[f"moe_bias/bias_{bias_i}"] = bias_list[bias_i].mean()
+
+        for layer_id, counts in token_selection_per_layer:
+            total = sum(counts) or 1.0
+            base = f"moe_ep_usage/L-{layer_id}_EP-"
+            # build and merge both “count” and “share” entries without explicit loops
+            extra_metrics.update(
+                {f"{base}{i}": cnt / total for i, cnt in enumerate(counts)}
+            )
 
         color = self.metrics_processor.color
         extra_print_data = ""

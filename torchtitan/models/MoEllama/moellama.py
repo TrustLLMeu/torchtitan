@@ -894,6 +894,7 @@ class Transformer(nn.Module, ModelProtocol):
     def update_gate_bias(self):
         gates_to_update = []
         accumulated_adjustments = []
+        token_selection_per_layer = []
 
         for layer in self.layers.values():
             if hasattr(layer.feed_forward, "gate"):
@@ -921,7 +922,10 @@ class Transformer(nn.Module, ModelProtocol):
 
         for layer in self.layers.values():
             if hasattr(layer, "update_gate_bias"):
+                counts = layer.feed_forward.gate._accumulated_adjustment.cpu().tolist()
+                token_selection_per_layer.append((layer.layer_id, counts))
                 layer.update_gate_bias()
+        return token_selection_per_layer
 
     def get_sparsity_ratio(self):
         # we assume all layers have the same number of activated and routed experts
