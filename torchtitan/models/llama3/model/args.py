@@ -46,6 +46,8 @@ class TransformerModelArgs(BaseModelArgs):
     depth_init: bool = True
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
+    # If this is True, it implies `qk_norm=True`.
+    norm_everywhere: bool = False
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
@@ -84,6 +86,7 @@ class TransformerModelArgs(BaseModelArgs):
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
             )
         self.max_seq_len = seq_len
+        self.qk_norm = self.qk_norm or self.norm_everywhere
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
