@@ -132,6 +132,8 @@ def parallelize_llama(
                 dp_mod_ep_mesh_dim_names.append("dp_replicate")
             dp_mod_ep_mesh_dim_names.append("dp_shard_1")
 
+        ep_enabled = parallel_dims.ep_mode == "naive_dp2ep" and parallel_dims.ep_enabled
+
         apply_fsdp(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
@@ -140,7 +142,7 @@ def parallelize_llama(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
-            ep_enabled=parallel_dims.ep_mode == "naive_dp2ep" and parallel_dims.ep_enabled,
+            ep_enabled=ep_enabled,
             dp_mod_ep_mesh=world_mesh[tuple(dp_mod_ep_mesh_dim_names)],
         )
 
