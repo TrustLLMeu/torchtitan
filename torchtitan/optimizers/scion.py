@@ -4,33 +4,39 @@ import torch.distributed.tensor
 from torchtitan.optimizers.muon_utils import zeropower_backends, gather_full_grad
 
 __all__ = [
-    'Scion',
+    "Scion",
 ]
 
 
 class Scion(torch.optim.Optimizer):
 
     def __init__(
-            self,
-            params,
-            is_light,
-            is_unconstrained,
-            lr,
-            momentum,
-            nesterov,
-            eps,
-            norm_factor,
-            backend,
-            backend_steps,
-            world_mesh,
+        self,
+        params,
+        is_light,
+        is_unconstrained,
+        lr,
+        momentum,
+        nesterov,
+        eps,
+        norm_factor,
+        backend,
+        backend_steps,
+        world_mesh,
     ):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov,
-                        eps=eps, norm_factor=norm_factor,
-                        backend=backend, backend_steps=backend_steps)
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            nesterov=nesterov,
+            eps=eps,
+            norm_factor=norm_factor,
+            backend=backend,
+            backend_steps=backend_steps,
+        )
         self.is_light = is_light
         # NB: use default momentum here, param groups can have its own
         #     values
-        self.use_momentum = (momentum > 0 and momentum < 1)
+        self.use_momentum = momentum > 0 and momentum < 1
         self.is_unconstrained = is_unconstrained
         mesh_dim_names = world_mesh.mesh_dim_names if world_mesh is not None else None
         self.fsdp_enabled = mesh_dim_names is not None and (
@@ -61,21 +67,20 @@ class Scion(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            lr = group['lr']
-            nesterov = group['nesterov']
-            momentum = group['momentum']
+            lr = group["lr"]
+            nesterov = group["nesterov"]
+            momentum = group["momentum"]
             param_kwargs = {
-                'eps': group['eps'],
-                'norm_factor': group['norm_factor'],
-                'zeropower_backend': zeropower_backends[group['backend']],
-                'backend_steps': group['backend_steps']
+                "eps": group["eps"],
+                "norm_factor": group["norm_factor"],
+                "zeropower_backend": zeropower_backends[group["backend"]],
+                "backend_steps": group["backend_steps"],
             }
             # NB: here assume that normalisation with norm_factor is
             #     done across non-sharded axis, so can skip
             #     communication
             need_to_gather_and_shard = not (
-                group['backend'] == 'identity' and
-                'embed' in group['norm_factor']
+                group["backend"] == "identity" and "embed" in group["norm_factor"]
             )
             if self.is_light and nesterov:
                 raise NotImplementedError(
@@ -83,7 +88,7 @@ class Scion(torch.optim.Optimizer):
                     "Please set nesterov=False."
                 )
 
-            for p in group['params']:
+            for p in group["params"]:
                 g = self.get_momentum_or_grad(
                     p,
                     momentum,
@@ -110,11 +115,11 @@ class Scion(torch.optim.Optimizer):
                     )
 
                 if not self.is_unconstrained:
-                    p.data.mul_(1-lr)
+                    p.data.mul_(1 - lr)
                 p.data.add_(update, alpha=-lr)
 
                 if self.is_light and self.use_momentum:
-                    p.grad.mul_(1-momentum)
+                    p.grad.mul_(1 - momentum)
 
         return loss
 
@@ -137,39 +142,38 @@ class Scion(torch.optim.Optimizer):
             )
         else:
             raise ValueError(
-                f"Unsupported tensor shape: {g.shape}. "
-                "Expected 2D or 3D tensor."
+                f"Unsupported tensor shape: {g.shape}. " "Expected 2D or 3D tensor."
             )
 
         return g
 
     @torch.no_grad()
     def normalise_grad(self, g, norm_factor, eps):
-        if norm_factor == 'spectral':
-            g = g * (g.size(0)/g.size(1))**0.5
-        elif norm_factor == 'image_spectral':
+        if norm_factor == "spectral":
+            g = g * (g.size(0) / g.size(1)) ** 0.5
+        elif norm_factor == "image_spectral":
             # Image domain norm as described in Scion paper.
             g = g * max((g.size(0) / g.size(1)) ** 0.5, 1)
-        elif norm_factor.startswith('embed'):
+        elif norm_factor.startswith("embed"):
             # NB: here assume shape [vocab_size, embed_dim]
             rms_values = torch.sqrt(g.pow(2).sum(axis=1, keepdim=True))
             g = g / (rms_values + eps)
-            if norm_factor == 'embed_linear':
+            if norm_factor == "embed_linear":
                 g = g * g.size(1)
-            elif norm_factor == 'embed_sqrt':
-                g = g * g.size(1)**0.5
+            elif norm_factor == "embed_sqrt":
+                g = g * g.size(1) ** 0.5
             else:
                 raise ValueError(f"Unknown norm_factor: {norm_factor}")
-        elif norm_factor.startswith('unembed'):
+        elif norm_factor.startswith("unembed"):
             rms_values = torch.sqrt(g.pow(2).sum(axis=1, keepdim=True))
             g = g / (rms_values + eps)
-            if norm_factor == 'unembed_linear':
+            if norm_factor == "unembed_linear":
                 g = g / g.size(1)
-            elif norm_factor == 'unembed_sqrt':
-                g = g / g.size(1)**0.5
+            elif norm_factor == "unembed_sqrt":
+                g = g / g.size(1) ** 0.5
             else:
                 raise ValueError(f"Unknown norm_factor: {norm_factor}")
-        elif norm_factor == 'none':
+        elif norm_factor == "none":
             pass
         else:
             raise ValueError(f"Unknown norm_factor: {norm_factor}")
@@ -177,7 +181,9 @@ class Scion(torch.optim.Optimizer):
         return g
 
     @torch.no_grad()
-    def get_momentum_or_grad(self, p, momentum, nesterov, update_buffer=True, gather_to_local=True):
+    def get_momentum_or_grad(
+        self, p, momentum, nesterov, update_buffer=True, gather_to_local=True
+    ):
         g = p.grad
         if g is None or not p.requires_grad:
             return None
@@ -192,12 +198,12 @@ class Scion(torch.optim.Optimizer):
                         "Momentum buffer not found in optimizer state. "
                         "Please check if the optimizer is initialized correctly."
                     )
-            buf = state['momentum_buffer']
+            buf = state["momentum_buffer"]
             if update_buffer:
-                buf.mul_(1-momentum).add_(g, alpha=momentum)
+                buf.mul_(1 - momentum).add_(g, alpha=momentum)
             else:
-                buf = buf.mul(1-momentum).add(g, alpha=momentum)
-            g = buf if not nesterov else buf.mul(1-momentum).add(g, alpha=momentum)
+                buf = buf.mul(1 - momentum).add(g, alpha=momentum)
+            g = buf if not nesterov else buf.mul(1 - momentum).add(g, alpha=momentum)
 
         if gather_to_local:
             g = gather_full_grad(g).to_local()
@@ -214,13 +220,13 @@ class Scion(torch.optim.Optimizer):
 
     def _store_grads_in_state(self):
         for group in self.param_groups:
-            for param in group['params']:
+            for param in group["params"]:
                 if isinstance(param, torch.Tensor) and param.grad is not None:
-                    self.state.setdefault(param, {})['grad_state'] = param.grad
+                    self.state.setdefault(param, {})["grad_state"] = param.grad
 
     def _load_grads_from_state(self):
-        for (param, state) in self.state.items():
-            if 'grad_state' in state:
-                param.grad = state['grad_state']
+        for param, state in self.state.items():
+            if "grad_state" in state:
+                param.grad = state["grad_state"]
             elif isinstance(param, torch.Tensor):
                 param.grad = None
