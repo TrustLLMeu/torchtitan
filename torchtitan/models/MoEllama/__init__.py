@@ -27,6 +27,9 @@ moe_llama3_configs = {
         n_shared_experts=1,
         activate_experts=2,
         n_routed_experts=8,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "1B-7B": MoEModelArgs(
         dim=2048,
@@ -38,6 +41,8 @@ moe_llama3_configs = {
         activate_experts=8,
         n_routed_experts=64,
         qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "3B": MoEModelArgs(
         dim=3072,
@@ -48,6 +53,9 @@ moe_llama3_configs = {
         n_shared_experts=1,
         activate_experts=8,
         n_routed_experts=64,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "8B": MoEModelArgs(
         dim=4096,
@@ -60,6 +68,9 @@ moe_llama3_configs = {
         n_shared_experts=1,
         activate_experts=8,
         n_routed_experts=64,
+        qk_norm=False,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "8B_qk": MoEModelArgs(
         dim=4096,
@@ -69,10 +80,12 @@ moe_llama3_configs = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
-        qk_norm=True,
         n_shared_experts=1,
         activate_experts=8,
         n_routed_experts=64,
+        qk_norm=True,
+        depth_init=False,
+        norm_eps=1e-30,
     ),
     "70B": MoEModelArgs(
         dim=8192,
