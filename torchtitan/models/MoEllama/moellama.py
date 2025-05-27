@@ -72,7 +72,7 @@ class MoEModelArgs(BaseModelArgs):
     n_routed_experts: int = 0
     activate_experts: int = 0
     moe_gate_bias_update_speed: float = 0.001  # dpskv3, 0.001
-    moe_aux_loss_alpha: float = 0.001
+    moe_aux_loss_alpha: float = 0  # OLMoE, default 0.01
     moe_routed_scaling_factor = None
     # dpskv3 2.5, moonlight 2.446, set None to auto-compute
     moe_gate_use_bias_for_routing: bool = True
