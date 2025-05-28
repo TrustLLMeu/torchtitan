@@ -95,8 +95,6 @@ class TransformerModelArgs(BaseModelArgs):
         # optional.
         if hasattr(tokenizer, "pad_id"):
             self.pad_id = tokenizer.pad_id
-        else:
-            self.pad_id = -1
         # Add an additional vocab element if we are explicitly
         # supporting a pad token.
         if self.pad_id >= 0:
