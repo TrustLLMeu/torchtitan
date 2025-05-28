@@ -59,6 +59,7 @@ class MoEModelArgs(BaseModelArgs):
     final_out_exp: float = -0.5
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
+    # If this is True, it implies `qk_norm=True`.
     norm_everywhere: bool = False
 
     use_flex_attn: bool = False
