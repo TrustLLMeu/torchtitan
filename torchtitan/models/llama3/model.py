@@ -688,8 +688,6 @@ class Transformer(nn.Module, ModelProtocol):
         self.pad_id = model_args.pad_id
 
         self.tok_embeddings = nn.Embedding(
-            # Add an additional embedding vector if we are explicitly
-            # supporting a pad token.
             model_args.vocab_size,
             model_args.dim,
             padding_idx=self.pad_id if self.pad_id >= 0 else None,
