@@ -148,7 +148,8 @@ def init_all_experts_different(init_fn, w, init_std):
 
     for e in range(local_tensor.shape[0]):
         rank = dist.get_rank()
-        seed = rank * 50000 + e * 100 + torch.randint(0, 10000)
+        rand_offset = torch.randint(0, 10000, size=(), device="cpu").item()
+        seed = rank * 50000 + e * 100 + rand_offset
         # for each rank, layer, expert, [w1, w2, w3], we need to set a different seed
         if w.device.type == "meta":
             rng = None
