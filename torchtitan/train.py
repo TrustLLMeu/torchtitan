@@ -380,10 +380,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.job_config.job.dump_folder,
                 "job_config_" + datetime.datetime.now().strftime("%Y%m%d-%H%M") + ".json",
             )
+            config_dict = self.job_config.to_dict()
             with open(job_config_save_path, "w") as f:
-                json.dump(self.job_config.to_dict(), f, indent=4)
-            with open(job_config_save_path.replace(".json", ".toml"), "w") as f:
-                tomli_w.dump(self.job_config.to_dict(), f)
+                json.dump(config_dict, f, indent=4)
+
+            clean_config_dict = {}
+            for (header, subdict) in config_dict.items():
+                clean_subdict = {}
+                clean_config_dict[header] = clean_subdict
+                for (key, value) in subdict.items():
+                    if value is not None:
+                        clean_subdict[key] = value
+
+            with open(job_config_save_path.replace(".json", ".toml"), "wb") as f:
+                tomli_w.dump(clean_config_dict, f)
 
     def save_model_args(self, model_args: train_spec_module.BaseModelArgs):
         if torch.distributed.get_rank() == 0:
