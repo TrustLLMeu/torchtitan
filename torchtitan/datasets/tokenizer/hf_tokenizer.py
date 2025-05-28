@@ -29,8 +29,8 @@ class HFTokenizer(Tokenizer):
         ), f"The tokenizer's directory does not exist: {tokenizer_dir}"
         assert os.path.isdir(tokenizer_dir), tokenizer_dir
 
-        self.config = AutoConfig.from_pretrained(tokenizer_dir)
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
+        self.config = AutoConfig.from_pretrained(tokenizer_dir, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, trust_remote_code=True)
 
         self._n_words: int = self.tokenizer.vocab_size
         # BOS / EOS token IDs
