@@ -400,7 +400,7 @@ class MoE(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = int(hidden_dim * ratio)
 
-        hidden_dim += -hidden_dim % multiple_of
+        hidden_dim += -(hidden_dim % multiple_of)
 
         self.n_routed_experts = n_routed_experts
         self.topk = activate_experts
