@@ -91,6 +91,10 @@ class TransformerModelArgs(BaseModelArgs):
             value = getattr(job_config.model, name)
             setattr(self, name, value)
         self.vocab_size = tokenizer.n_words
+        # `eos_id` is not part of the `Tokenizer` interface, so keep it
+        # optional.
+        if hasattr(tokenizer, "eos_id"):
+            self.eos_id = tokenizer.eos_id
         # `pad_id` is not part of the `Tokenizer` interface, so keep it
         # optional.
         if hasattr(tokenizer, "pad_id"):
