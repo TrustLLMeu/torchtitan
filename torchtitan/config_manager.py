@@ -541,7 +541,9 @@ class JobConfig:
                 packing. If not given, only mix in batch dimenison.""",
         )
         self.parser.add_argument(
-            "--training.dataset_inner_name", type=string_list, help="Dataset name to use"
+            "--training.dataset_inner_name",
+            type=string_list,
+            help="Dataset name to use (`name` argument of `datasets.load_dataset`)",
         )
         self.parser.add_argument(
             "--training.dataset_files",
