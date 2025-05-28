@@ -7,7 +7,11 @@
 import os
 from collections.abc import Sequence
 
-from transformers import AutoConfig, AutoTokenizer
+try:
+    from transformers import AutoConfig, AutoTokenizer
+except ModuleNotFoundError:
+    AutoConfig = None
+    AutoTokenizer = None
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
@@ -23,6 +27,10 @@ class HFTokenizer(Tokenizer):
     """
 
     def __init__(self, tokenizer_dir: str):
+        assert AutoConfig is not None, (
+            "`transformers` library is not installed. Make sure it is available to use the "
+            "`HFTokenizer`."
+        )
         super().__init__()
         assert os.path.exists(
             tokenizer_dir,
