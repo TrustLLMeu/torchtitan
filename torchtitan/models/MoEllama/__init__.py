@@ -44,9 +44,16 @@ moe_llama3_configs = {
         norm_eps=1e-20,
         rope_theta=10000,
         depth_init=False,
+        init_gate_as_residual=False,
         norm_type="np_rmsnorm",
         norm_everywhere=False,
         multiple_of=64,
+        # MoE specific args
+        moe_gate_bias_update_speed=0.001,
+        moe_aux_loss_alpha=0.01,
+        moe_routed_scaling_factor=None,  # will be set automatically
+        moe_gate_use_bias_for_routing=True,
+        moe_init_all_experts_same=False,
     ),
     "1B-7B": MoEModelArgs(
         dim=2048,
@@ -60,9 +67,16 @@ moe_llama3_configs = {
         norm_eps=1e-20,
         rope_theta=10000,
         depth_init=False,
+        init_gate_as_residual=False,
         norm_type="np_rmsnorm",
         norm_everywhere=False,
         multiple_of=256,
+        # MoE specific args
+        moe_gate_bias_update_speed=0.001,
+        moe_aux_loss_alpha=0.01,
+        moe_routed_scaling_factor=None,  # will be set automatically
+        moe_gate_use_bias_for_routing=True,
+        moe_init_all_experts_same=False,
     ),
     "1B-7B-norm-everywhere": MoEModelArgs(
         dim=2048,
@@ -76,9 +90,16 @@ moe_llama3_configs = {
         norm_eps=1e-20,
         rope_theta=10000,
         depth_init=False,
+        init_gate_as_residual=False,
         norm_type="np_rmsnorm",
         norm_everywhere=True,
         multiple_of=256,
+        # MoE specific args
+        moe_gate_bias_update_speed=0.001,
+        moe_aux_loss_alpha=0.01,
+        moe_routed_scaling_factor=None,  # will be set automatically
+        moe_gate_use_bias_for_routing=True,
+        moe_init_all_experts_same=False,
     ),
 }
 
