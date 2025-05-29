@@ -366,7 +366,7 @@ class MoE(nn.Module):
         self,
         dim: int,
         multiple_of: int = 256,
-        n_shared_experts: int = 2,
+        n_shared_experts: int = 1,
         n_routed_experts: int = 8,
         activate_experts: int = 2,
         ffn_dim_multiplier: Optional[float] = None,
