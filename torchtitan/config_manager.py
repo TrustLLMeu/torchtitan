@@ -574,6 +574,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.global_batch_size",
             type=int,
+            default=-1,
             help=(
                 "Global batch size "
                 "(defaults to `training.batch_size * data-parallel degree`)"
