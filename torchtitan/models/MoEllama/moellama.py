@@ -389,19 +389,15 @@ class MoE(nn.Module):
         """
 
         if match_dim_with_dense:
-            total_activate_experts = n_shared_experts + activate_experts
-            ratio = total_activate_experts / (n_routed_experts + n_shared_experts)
+            ratio = 1.0 / (activate_experts + n_shared_experts)
         else:
             ratio = 1.0
 
-        hidden_dim = 4 * dim
-        hidden_dim = int(2 * hidden_dim / 3)
+        hidden_dim = 2 * 4 * dim / 3
         if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+            hidden_dim = ffn_dim_multiplier * hidden_dim
         hidden_dim = int(hidden_dim * ratio)
-
-        hidden_dim += -(hidden_dim % multiple_of)
-
+        hidden_dim = hidden_dim - hidden_dim % multiple_of
         self.n_routed_experts = n_routed_experts
         self.topk = activate_experts
         self.n_shared_experts = n_shared_experts
