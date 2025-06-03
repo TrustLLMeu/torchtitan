@@ -333,7 +333,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
                         "nesterov": group["nesterov"],
                         "eps": group["eps"],
                         "norm_factor": group["norm_factor"],
-                        "zeropower_backend": zeropower_backends[group["backend"]],
+                        "zeropower_backend": group["backend"],
                         "backend_steps": group["backend_steps"],
                     }
                 elif isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):

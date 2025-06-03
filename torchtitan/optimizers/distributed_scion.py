@@ -52,8 +52,6 @@ def calculate_shard_shape(shape, rank, world_size):
 
 
 class DistributedScion(torch.optim.Optimizer):
-    CACHE_GRAD = set()
-
     def __init__(
         self,
         params,
@@ -125,7 +123,7 @@ class DistributedScion(torch.optim.Optimizer):
             param_kwargs = {
                 "eps": group["eps"],
                 "norm_factor": group["norm_factor"],
-                "zeropower_backend": zeropower_backends[group["backend"]],
+                "zeropower_backend": group["backend"],
                 "backend_steps": group["backend_steps"],
             }
             self.groups_info[group_idx] = [lr, nesterov, momentum, param_kwargs]
@@ -157,7 +155,7 @@ class DistributedScion(torch.optim.Optimizer):
             param_kwargs = {
                 "eps": group["eps"],
                 "norm_factor": group["norm_factor"],
-                "zeropower_backend": zeropower_backends[group["backend"]],
+                "zeropower_backend": group["backend"],
                 "backend_steps": group["backend_steps"],
             }
             self.groups_info[group_idx] = [lr, nesterov, momentum, param_kwargs]
@@ -171,11 +169,7 @@ class DistributedScion(torch.optim.Optimizer):
                     or norm_factor.startswith("unembed")
                 )
 
-                if (
-                    backend is zeropower_backends["identity"]
-                    and is_embed_norm
-                    and self.fsdp_enabled
-                ):
+                if backend == "identity" and is_embed_norm and self.fsdp_enabled:
                     sgd_params.append(p)
                     # fsdp_params.append(p)
                     continue
@@ -207,7 +201,7 @@ class DistributedScion(torch.optim.Optimizer):
         #     since it is also called during the log of gradients
         # g = zeropower_backend(g, steps=backend_steps, eps=eps)
         def _lmo_for_2d_tensor(g):
-            g = zeropower_backend(g, steps=backend_steps, eps=eps)
+            g = zeropower_backends[zeropower_backend](g, steps=backend_steps, eps=eps)
             g = self.normalise_grad(g, norm_factor=norm_factor, eps=eps)
             return g
 
@@ -280,7 +274,6 @@ class DistributedScion(torch.optim.Optimizer):
 
         for idx_in_bucket in range(start_idx, end_idx):
             shift = idx_in_bucket - start_idx
-            self.CACHE_GRAD.add(idx_in_bucket)
             p = params[idx_in_bucket]
             u = updates[shift]
             lr, nesterov, momentum, param_kwargs = self.groups_info[
@@ -400,14 +393,14 @@ class DistributedScion(torch.optim.Optimizer):
             # Step 1: Prepare data for first all_to_all
             send_list = []
             send_shapes = []
-            target_shape = None
+            target_shape, param_kwargs = None, None
 
             for rank_idx in range(world_size):
                 current_rank_idx = start_idx + rank_idx
 
                 if current_rank_idx < len(fsdp_params):
                     p = fsdp_params[current_rank_idx]
-                    _, nesterov, momentum, _ = self.groups_info[
+                    _, nesterov, momentum, param_kwargs = self.groups_info[
                         self.paramters_to_groups[id(p)]
                     ]
                     g = (
@@ -435,6 +428,9 @@ class DistributedScion(torch.optim.Optimizer):
             # Make sure target_shape is initialized
             if target_shape is None and end_idx > 0:
                 target_shape = fsdp_params[end_idx - 1].shape
+                param_kwargs = self.groups_info[
+                    self.paramters_to_groups[id(fsdp_params[end_idx - 1])]
+                ][-1]
 
             recv_shapes = [
                 calculate_shard_shape(target_shape, rank_idx, world_size)
@@ -449,10 +445,6 @@ class DistributedScion(torch.optim.Optimizer):
             # All tensors in recv_list should have the same dimensions except for dim 0
 
             full_g = torch.cat(recv_list, dim=0)
-            _IDX_OF_NS5 = min(start_idx + rank, end_idx - 1)
-            _, _, _, param_kwargs = self.groups_info[
-                self.paramters_to_groups[id(fsdp_params[_IDX_OF_NS5])]
-            ]
 
             u = self.lmo(full_g, **param_kwargs)
 
@@ -472,8 +464,6 @@ class DistributedScion(torch.optim.Optimizer):
                 start_idx,
                 end_idx,
             )
-
-        self.CACHE_GRAD.clear()
 
     def step_expert(self, expert_params):
         if len(expert_params) == 0:
