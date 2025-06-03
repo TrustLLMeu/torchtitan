@@ -23,22 +23,35 @@ def dispatch_tokens(x, ep_mesh, ep_size, tokens_per_expert, force_float32=False)
     expert_per_rank = total_experts // ep_size
 
     if ep_size == 1:
-        dim = x.shape[1]
+        # Single‐rank case: just reshape and pad once.
         num_experts = tokens_per_expert.shape[0]
         max_tokens = torch.max(tokens_per_expert)
 
         output = torch.zeros(
-            (num_experts, max_tokens, dim),
+            (num_experts, max_tokens, dim_in),
             device=x.device,
             dtype=x.dtype,
         )
 
-        start = 0
-        for i in range(len(tokens_per_expert)):
-            n = tokens_per_expert[i]
-            if n > 0:
-                output[i, :n] = x[start : start + n]
-                start += n
+        # Compute cumulative offsets to know where each expert's tokens begin in x
+        token_offsets = torch.zeros_like(tokens_per_expert)
+        token_offsets[1:] = torch.cumsum(tokens_per_expert[:-1], dim=0)
+
+        # Build two index arrays:
+        # 1. expert_ids: repeated expert index for each routed token
+        expert_ids = torch.arange(total_experts, device=x.device).repeat_interleave(
+            tokens_per_expert
+        )
+
+        # 2. pos_in_expert: for each token in sorted order, its row index within that expert's tree
+        token_offsets = torch.zeros_like(tokens_per_expert)
+        token_offsets[1:] = torch.cumsum(tokens_per_expert[:-1], dim=0)
+        expert_offsets = token_offsets.repeat_interleave(tokens_per_expert)
+        pos_in_expert = torch.arange(x.shape[0], device=x.device) - expert_offsets
+
+        # Now scatter sorted tokens (x is already sorted externally before calling this)
+        sorted_tokens = x  # assume x is already in the order "by expert group"
+        output[expert_ids, pos_in_expert] = sorted_tokens
         return output, tokens_per_expert.view(1, -1)  # shape: [1, num_experts]
 
     # Synchronize tokens_per_expert across all processes
@@ -48,12 +61,8 @@ def dispatch_tokens(x, ep_mesh, ep_size, tokens_per_expert, force_float32=False)
         torch.zeros_like(tokens_per_expert) for _ in range(ep_size)
     ]
     torch.distributed.all_gather(
-        tokens_per_expert_list,
-        tokens_per_expert,
-        group=ep_group,
+        tokens_per_expert_list, tokens_per_expert, group=ep_group
     )
-
-    # Combine into a single tensor -> [ep_size, num_experts]
     all_tokens_per_expert = torch.stack(tokens_per_expert_list)
 
     # Compute offsets for each expert's tokens in the flattened tensor
@@ -63,126 +72,146 @@ def dispatch_tokens(x, ep_mesh, ep_size, tokens_per_expert, force_float32=False)
     # Find maximum tokens per expert across all ranks for padding
     max_tokens = torch.stack([tpe.max() for tpe in tokens_per_expert_list]).max()
 
+    x_reshaped = torch.zeros(
+        (total_experts, max_tokens, dim_in), device=x.device, dtype=x.dtype
+    )
     # Reshape input according to variable tokens per expert
-    expert_tensors = []
+    # Build expert_ids & pos_in_expert exactly as above:
+    expert_ids = torch.arange(total_experts, device=x.device).repeat_interleave(
+        tokens_per_expert
+    )
+    expert_offsets = token_offsets.repeat_interleave(tokens_per_expert)
+    pos_in_expert = torch.arange(x.shape[0], device=x.device) - expert_offsets
 
-    for i in range(total_experts):
-        # Extract tokens for this expert
-        start_idx = token_offsets[i]
-        expert_tokens = x[start_idx : start_idx + tokens_per_expert[i]]
-
-        # Pad to max_tokens if necessary
-        if expert_tokens.shape[0] < max_tokens:
-            padding = torch.zeros(
-                (max_tokens - expert_tokens.shape[0], dim_in),
-                dtype=x.dtype,
-                device=x.device,
-            )
-
-            expert_tokens = torch.cat([expert_tokens, padding], dim=0)
-
-        expert_tensors.append(expert_tokens.unsqueeze(0))  # Add expert dimension
-
-    # Concatenate into single tensor of shape [num_experts, max_tokens, dim_in]
-    x_reshaped = torch.cat(expert_tensors, dim=0)
-
-    # Rearrange for all-to-all
-    x_for_a2a = rearrange(
-        x_reshaped, "(ep er) t d -> ep (er t) d", ep=ep_size, er=expert_per_rank
-    ).contiguous()
-
-    original_dtype = x_for_a2a.dtype
-    if force_float32:
-        all_to_all_dtype = torch.float32
-    else:
-        all_to_all_dtype = original_dtype
-
-    output = torch.distributed.nn.functional.all_to_all_single(
-        torch.empty_like(x_for_a2a, dtype=all_to_all_dtype),
-        x_for_a2a.to(all_to_all_dtype),
-        group=ep_group,
-    ).to(original_dtype)
-
-    # Rearrange output to the correct final shape
-    # Each rank now gets expert_per_rank experts, each with tokens from all ep_size ranks
-    output = rearrange(
-        output, "ep (er t) d -> er (ep t) d", er=expert_per_rank, t=max_tokens
+    # Now scatter sorted tokens into a single big zero‐tensor
+    x_reshaped[expert_ids, pos_in_expert] = (
+        x  # assume x is already sorted by expert key before this function is called
     )
 
-    torch.distributed.barrier(ep_group)
+    # Reshape for all_to_all: from [total_experts, max_tokens, dim_in] to [ep_size, expert_per_rank * max_tokens, dim_in]
+    x_for_a2a = x_reshaped.view(
+        ep_size, expert_per_rank * max_tokens, dim_in
+    ).contiguous()
 
-    # Return both the output tensor and the token distribution information
+    # Possibly cast to float32 if requested
+    original_dtype = x_for_a2a.dtype
+    if force_float32:
+        x_for_a2a = x_for_a2a.to(torch.float32)
+
+    # One all‐to‐all swap
+    buffer = torch.empty_like(x_for_a2a, dtype=x_for_a2a.dtype)
+    output = torch.distributed.nn.functional.all_to_all_single(
+        buffer, x_for_a2a, group=ep_group
+    )
+    output = output.to(original_dtype)
+
+    # Each rank now has [expert_per_rank, ep_size * max_tokens, dim_in]
+    output = output.view(expert_per_rank, ep_size * max_tokens, dim_in)
+    torch.distributed.barrier(ep_group)
     return output, all_tokens_per_expert
 
 
-def combine_tokens(x, ep_mesh, ep_size, all_tokens_per_expert, force_float32=False):
+def combine_tokens(
+    x: torch.Tensor,
+    ep_mesh,
+    ep_size: int,
+    all_tokens_per_expert: torch.Tensor,
+    force_float32: bool = False,
+):
     """
-    Combine tokens from different ranks back to their original experts.
-    This is the inverse operation of dispatch_tokens.
+    Combine tokens from different ranks back into a single flattened tensor.
+    This is the inverse of dispatch_tokens. Inputs:
 
-    Args:
-        x: Tensor of shape (expert_per_rank, tokens_per_expert * ep_size, dim_in)
-        ep_size: int, number of EP ranks (world size)
-        ep_mesh: torch.distributed process group for EP parallel
-        all_tokens_per_expert: tensor of shape [ep_size, num_experts],
-                              containing number of tokens per expert across all ranks
+      - x: a tensor of shape (experts_per_rank, ep_size * max_tokens, dim_in)
+      - all_tokens_per_expert: a tensor of shape (ep_size, total_experts)
+      - ep_size: number of ranks
+      - ep_mesh: the process group
 
     Returns:
-        output: Tensor of shape (num_experts, tokens_per_expert, dim_in) - flattened tokens
-    """
-    ep_size = 1 if ep_mesh is None else ep_mesh.size()
-    expert_per_rank, tokens_per_all_ranks, dim_in = x.shape
-    total_experts = expert_per_rank * ep_size
-    max_tokens_per_expert = tokens_per_all_ranks // ep_size
+      - a single tensor of shape (sum_of_all_tokens, dim_in), where tokens are
+        concatenated in expert order.
 
+    Steps:
+      1) Perform an all-to-all to gather each expert’s padded bucket back onto one rank.
+      2) Remove zero-padding from each expert’s bucket by using the token counts.
+      3) Concatenate all unpadded buckets in the natural expert ordering.
+    """
+    # If only one rank, there’s no need for all-to-all; just unpad in place.
     if ep_size == 1:
-        tokens_per_expert = all_tokens_per_expert[0]  # [num_experts]
-        output_chunks = []
-        for i in range(x.shape[0]):
-            n = tokens_per_expert[i].item()
-            if n > 0:
-                output_chunks.append(x[i, :n])
-        return torch.cat(output_chunks, dim=0)  # shape: [total_routed_tokens, dim]
+        experts_per_rank, max_tokens, dim_in = x.shape
+        tokens_per_expert = all_tokens_per_expert[0]
+        total_experts = experts_per_rank
+
+        valid_ranges = torch.arange(max_tokens, device=x.device).unsqueeze(0)
+        limits = tokens_per_expert.unsqueeze(1)
+        mask = valid_ranges < limits
+
+        flat_x = x.reshape(-1, dim_in)
+
+        expert_indices = torch.arange(total_experts, device=x.device).unsqueeze(1)
+        per_expert_base = expert_indices * max_tokens
+        offsets = torch.arange(max_tokens, device=x.device).unsqueeze(0)
+        row_indices = per_expert_base + offsets
+
+        flat_row_mask = mask.view(-1)
+        selected_rows = row_indices.view(-1)[flat_row_mask]
+        return flat_x.index_select(0, selected_rows)
 
     ep_group = ep_mesh.get_group()
-    # Rearrange to prepare for all-to-all communication
-    x_for_a2a = rearrange(
-        x, "er (ep t) d -> ep (er t) d", ep=ep_size, t=max_tokens_per_expert
-    ).contiguous()
+    experts_per_rank, total_padded, dim = x.shape
 
-    # Perform all-to-all communication
-    original_dtype = x_for_a2a.dtype
-    if force_float32:
-        all_to_all_dtype = torch.float32
-    else:
-        all_to_all_dtype = original_dtype
+    our_rank = torch.distributed.get_rank(group=ep_group)
 
-    output_a2a = torch.distributed.nn.functional.all_to_all_single(
-        torch.empty_like(x_for_a2a, dtype=all_to_all_dtype),
-        x_for_a2a.to(all_to_all_dtype),
-        group=ep_group,
-    ).to(original_dtype)
-
-    # Rearrange to get experts back in their original form
-    # (num_experts, max_tokens_per_expert, dim_in)
-    experts_output = rearrange(
-        output_a2a, "ep (er t) d -> (ep er) t d", er=expert_per_rank
+    experts_per_rank, total_padded, dim = x.shape
+    assert (
+        total_padded % ep_size == 0
+    ), f"total_padded ({total_padded}) is not divisible by ep_size ({ep_size})"
+    L = total_padded // ep_size  # = “max_tokens per expert, on each rank”
+    total_experts = experts_per_rank * ep_size
+    assert total_experts == all_tokens_per_expert.size(1), (
+        f"Expected all_tokens_per_expert.size(1) == {total_experts}, but got "
+        f"{all_tokens_per_expert.size(1)}"
     )
 
-    # Get the actual number of tokens for each expert in this rank
-    # We use the slice corresponding to the current rank
-    rank = torch.distributed.get_rank(group=ep_group)
-    tokens_per_expert = all_tokens_per_expert[rank]
+    # (1) Reshape to do the inverse all_to_all
+    #     x_for_a2a shape = (ep_size, experts_per_rank * L, dim)
+    x_for_a2a = x.view(ep_size, experts_per_rank * L, dim).contiguous()
+    orig_dtype = x_for_a2a.dtype
+    if force_float32:
+        x_for_a2a = x_for_a2a.to(torch.float32)
 
-    # Calculate total tokens to allocate the output tensor
-    total_tokens = tokens_per_expert.sum().item()
+    # (2) Inverse all-to-all
+    buffer = torch.empty_like(x_for_a2a, dtype=x_for_a2a.dtype)
+    gathered = torch.distributed.nn.functional.all_to_all_single(
+        buffer, x_for_a2a, group=ep_group
+    )
+    gathered = gathered.to(orig_dtype)  # back to original dtype
 
-    output_chunks = []
-    for i in range(len(tokens_per_expert)):
-        num_tokens = tokens_per_expert[i].item()
-        if num_tokens > 0:
-            output_chunks.append(experts_output[i, :num_tokens])
+    # (3) Flatten in the order (expert_sub, token_pos, src_rank):
+    #     gathered shape = (ep_size, experts_per_rank * L, dim)
+    #     permute → (experts_per_rank * L, ep_size, dim) → view(-1, dim)
+    out_flat = gathered.permute(1, 0, 2).contiguous().view(-1, dim)
+    #   Expected out_flat.rows = experts_per_rank * L * ep_size = total_experts * L
+    assert out_flat.shape[0] == total_experts * L, (
+        f"After gather, out_flat has {out_flat.shape[0]} rows, but expected "
+        f"{total_experts} * {L} = {total_experts * L}"
+    )
 
-    flattened_output = torch.cat(output_chunks, dim=0)
-    torch.distributed.barrier(ep_group)
-    return flattened_output
+    idx_list = []
+    step = ep_size  # stride of src-rank column
+    block = L * ep_size  # rows per local expert
+
+    for g in range(total_experts):  # 0 … ep_size*experts_per_rank–1
+        src = g // experts_per_rank  # host rank of this expert
+        sub = g % experts_per_rank  # local index within its host
+        n_here = all_tokens_per_expert[our_rank, g].item()
+        if n_here == 0:
+            continue
+
+        base = sub * block + src  # first valid row for this pair
+        rows = torch.arange(n_here, device=x.device, dtype=torch.long) * step + base
+        idx_list.append(rows)
+
+    idx = torch.cat(idx_list)  # (B·S·top_k) == 16 384 long
+    correct_flat = out_flat.index_select(0, idx)
+    return correct_flat
