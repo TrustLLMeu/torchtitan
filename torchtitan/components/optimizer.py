@@ -26,7 +26,6 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 from torchtitan.optimizers import DistributedScion, Scion
-from torchtitan.optimizers.muon_utils import zeropower_backends
 from torchtitan.tools.logging import logger
 
 __all__ = [
