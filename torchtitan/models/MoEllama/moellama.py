@@ -842,7 +842,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.eos_id = model_args.eos_id
         self.pad_id = model_args.pad_id
 
-        print(
+        logger.info(
             f"model_args.dim = {model_args.dim} | model_args.vocab_size = {model_args.vocab_size}"
         )
 

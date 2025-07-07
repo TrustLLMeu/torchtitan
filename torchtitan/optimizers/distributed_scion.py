@@ -8,6 +8,7 @@ import torch.distributed.tensor
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Replicate
 
+from torchtitan.tools.logging import logger
 from .muon_utils import zeropower_backends
 
 __all__ = [
@@ -94,8 +95,8 @@ class DistributedScion(torch.optim.Optimizer):
             and "dp_shard_1" in mesh_dim_names
             and "dp_shard_0" in mesh_dim_names
         )
-        print(
-            f"Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained}) "
+        logger.info(
+            f"Distributed Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained}) "
             f"is enabled with world_mesh={world_mesh} | fsdp_enabled={self.fsdp_enabled} "
             f"| expert_enabled={self.expert_enabled}"
         )

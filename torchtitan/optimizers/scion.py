@@ -2,6 +2,7 @@ import torch
 import torch.distributed.tensor
 
 from torchtitan.optimizers.muon_utils import zeropower_backends, gather_full_grad
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "Scion",
@@ -42,7 +43,7 @@ class Scion(torch.optim.Optimizer):
         self.fsdp_enabled = mesh_dim_names is not None and (
             "dp_shard" in mesh_dim_names or "dp_shard_1" in mesh_dim_names
         )
-        print(
+        logger.info(
             f"Scion optimizer (is_light={self.is_light}, is_unconstrained={self.is_unconstrained})"
             f" is enabled with world_mesh={world_mesh} | fsdp_enabled={self.fsdp_enabled}"
         )
