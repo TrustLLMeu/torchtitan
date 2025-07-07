@@ -2,7 +2,11 @@ from dataclasses import dataclass
 import math
 from typing import Optional, Callable
 
-from grouped_gemm.ops import permute, unpermute
+try:
+    from grouped_gemm.ops import permute, unpermute
+except ImportError:
+    permute = None
+    unpermute = None
 import torch
 from torch import nn
 import torch.distributed.tensor
@@ -385,6 +389,14 @@ class MoE(nn.Module):
         norm_type: Optional[str] = None,
         norm_eps: Optional[float] = None,
     ):
+        if permute is None or unpermute is None:
+            raise ImportError(
+                "Functions from `grouped_gemm` package could not be imported. "
+                "Please install the package like\n`python -m pip install "
+                "git+https://github.com/fanshiqing/grouped_gemm@"
+                "5c1d831ecf91b225abc91689683e7de67fbee7ef`"
+            )
+
         super().__init__()
         """
         match_dim_with_dense.
