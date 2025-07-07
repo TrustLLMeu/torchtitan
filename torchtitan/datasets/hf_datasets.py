@@ -193,13 +193,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._sample_idx = 0
 
     def _get_data_iter(self):
-        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
-            return iter([])
+        # For map-style datasets, resume by skipping to the correct index
+        # For iterable-style datasets, the underlying iterator already points to the correct index
+        if isinstance(self._data, Dataset):
+            if self._sample_idx == len(self._data):
+                return iter([])
+            else:
+                return iter(self._data.skip(self._sample_idx))
 
-        it = iter(self._data)
-        for _ in range(self._sample_idx):
-            next(it)
-        return it
+        return iter(self._data)
 
     def __iter__(self):
         while True:
