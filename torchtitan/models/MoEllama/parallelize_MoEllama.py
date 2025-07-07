@@ -415,8 +415,16 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    import torch._dynamo
+
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, dynamic=True)
+        # transformer_block = torch.compile(transformer_block, dynamic=True)
+
+        torch._dynamo.config.suppress_errors = True
+        torch._dynamo.config.cache_size_limit = 16
+        transformer_block = torch.compile(
+            transformer_block, dynamic=False, mode="max-autotune"
+        )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
