@@ -17,6 +17,7 @@ import tomli_w
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
+import torchtitan.models
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 
