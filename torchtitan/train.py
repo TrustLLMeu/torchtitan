@@ -681,8 +681,8 @@ if __name__ == "__main__":
         trainer = Trainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
-            assert int(
-                os.environ["WORLD_SIZE"]
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
                 config.checkpoint.enable_checkpoint
@@ -691,11 +691,12 @@ if __name__ == "__main__":
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
-    finally:
+    except Exception:
         if trainer:
             trainer.close()
-
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
-            logger.info("Process group destroyed.")
+        raise
+    else:
+        trainer.close()
+        torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed.")
     os._exit(0)
