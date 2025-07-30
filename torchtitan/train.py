@@ -523,10 +523,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         self.checkpointer.maybe_wait_for_staging()
 
-        if (
-                self.job_config.metrics.log_norm_freq > 0
-                and (self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0)
-        ):
+        # Here we let the optimizer know that we need to calculate the
+        # norm at the next step
+        need_to_calculate_norm = (
+            self.job_config.metrics.log_norm_freq > 0
+            and self.metrics_processor.should_log(self.step)
+            and (
+                self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0
+            )
+        )
+        if need_to_calculate_norm:
             self.optimizers.calculate_norm_at_next_step()
 
         self.optimizers.step()
@@ -589,11 +595,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if grad_norm is not None:
             extra_metrics["optim/grad_norm"] = grad_norm
         extra_metrics.update(self.optimizers.get_lrs())
-        if (
-                self.job_config.metrics.log_norm_freq > 0
-                and (self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0)
-        ):
-            extra_metrics.update(self.optimizers.get_norms_at_current_step())
+
+        if need_to_calculate_norm:
+            # TODO(JSC): Notice that, original Gradient norm-log's LR is
+            #            always one-step-behind the actual LR.
+            #            The dist-scion now can calculate the norm at
+            #            current step - synced LR.
+            param_norms = self.optimizers.get_parameter_norms()
+            extra_metrics.update(param_norms)
 
         if aux_loss is not None:
             extra_metrics["loss_metrics/aux_loss"] = aux_loss
