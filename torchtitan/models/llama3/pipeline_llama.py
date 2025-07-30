@@ -130,6 +130,10 @@ def pipeline_llama_manual_split(
                 if drop_layers:
                     del model.mtp_layers[name]
 
+        # Handle special case where the final non-MTP layer is part of a
+        # pipeline stage that is _not_ the last one.
+        # TODO This does not handle the case where the final non-MTP
+        #      layer is _not_ included together with MTP layers.
         if (
                 not is_last
                 and not (
