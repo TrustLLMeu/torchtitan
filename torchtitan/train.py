@@ -522,6 +522,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
             )
         self.checkpointer.maybe_wait_for_staging()
+
+        if (
+                self.job_config.metrics.log_norm_freq > 0
+                and (self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0)
+        ):
+            self.optimizers.calculate_norm_at_next_step()
+
         self.optimizers.step()
         self.lr_schedulers.step()
 
@@ -586,8 +593,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.job_config.metrics.log_norm_freq > 0
                 and (self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0)
         ):
-            param_norms = self.optimizers.get_parameter_norms()
-            extra_metrics.update(param_norms)
+            extra_metrics.update(self.optimizers.get_norms_at_current_step())
 
         if aux_loss is not None:
             extra_metrics["loss_metrics/aux_loss"] = aux_loss
