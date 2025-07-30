@@ -48,6 +48,23 @@ def _wrap_ignore_generator(fn):
     return wrapped_fn
 
 
+# Deliberately throw away the `mean` argument and pass the `std`
+# argument as `gain` to the wrapped function.
+def _wrap_orthogonal(fn):
+
+    @functools.wraps(fn)
+    def wrapped_fn(
+            tensor: torch.Tensor,
+            mean: float | None = None,
+            std: float | None = 1,
+            *args,
+            **kwargs,
+    ):
+        return fn(tensor, gain=std, *args, **kwargs)
+
+    return wrapped_fn
+
+
 def orthogonal_(
         tensor: torch.Tensor,
         gain: float = 1.0,
@@ -156,22 +173,6 @@ def build_init_fn(init_fn_type: str):
         NotImplementedError: If an unknown `init_fn_type` is provided.
     """
     init_fn_type = init_fn_type.lower()  # Normalize to lowercase
-
-    # Deliberately throw away the `mean` argument and pass the `std`
-    # argument as `gain` to the wrapped function.
-    def _wrap_orthogonal(fn):
-
-        @functools.wraps(fn)
-        def wrapped_fn(
-                tensor: torch.Tensor,
-                mean: float | None = None,
-                std: float | None = 1,
-                *args,
-                **kwargs,
-        ):
-            return fn(tensor, gain=std, *args, **kwargs)
-
-        return wrapped_fn
 
     if init_fn_type == "trunc_normal":
         return nn.init.trunc_normal_
