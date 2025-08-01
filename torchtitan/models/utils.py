@@ -374,7 +374,8 @@ def get_dense_model_nparams_and_flops(
         seq_len: The sequence length in training configs.
 
     Returns:
-        Tuple of (nparams, num_flops_per_token):
+        Tuple of (active_params, nparams, num_flops_per_token):
+            active_params: Total number of [activate] model parameters.
             nparams: Total number of model parameters.
             num_flops_per_token: Estimated number of floating point operations per token.
     """
@@ -402,7 +403,8 @@ def get_dense_model_nparams_and_flops(
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
         nparams = nparams - nparams_embedding
 
-    return nparams, num_flops_per_token
+    active_params = nparams
+    return active_params, nparams, num_flops_per_token
 
 
 def get_moe_model_nparams_and_flops(
@@ -467,4 +469,6 @@ def get_moe_model_nparams_and_flops(
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
         nparams = nparams - nparams_embedding
 
-    return nparams, num_flops_per_token
+    active_params = nparams_sparse_active + nparams_embedding
+
+    return active_params, nparams, num_flops_per_token
