@@ -614,7 +614,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
-                    aux_loss = pred.get("aux_loss", None)
+                    if isinstance(pred, dict):
+                        aux_loss = pred.get("aux_loss", None)
 
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
