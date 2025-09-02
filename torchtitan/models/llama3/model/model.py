@@ -736,9 +736,6 @@ class Transformer(nn.Module, ModelProtocol):
                 This will always be the input batch regardless of the pipeline stage.
                 This field is required for non-first PP stages to perform document
                 masking attention (to analyze the boundary of the document).
-            prev_embed (torch.Tensor | None): Output token embeddings of
-                previous Transformer layer (after output norm, before
-                unembedding).
 
         Returns:
             MTPInputsDict: Dictionary containing the following keys and

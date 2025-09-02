@@ -674,10 +674,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_metrics.update(self.optimizers.get_lrs())
 
         if need_to_calculate_norm:
-            # TODO(JSC)-Fixed: Notice that the original Gradient norm-log's LR is
-            #                  always one step behind the actual LR.
-            #                  Dist-scion can now calculate the norm at
-            #                  current step - synced LR.
             param_norms = self.optimizers.get_parameter_norms()
             extra_metrics.update(param_norms)
 
