@@ -106,8 +106,10 @@ NORM_FUNCTIONS = {
 }
 
 
+# here we use allow dynamic is to support the DDP running
 @torch.no_grad()
-@torch.compile(fullgraph=True)
+@torch.compile(dynamic=True)
+# @torch.compile(fullgraph=True)
 def fused_metrics(W, eps=1e-20):
     if W.ndim < 2:
         # Operator norms require a matrix.

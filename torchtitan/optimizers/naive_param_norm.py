@@ -20,7 +20,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Replicate
 
-from torchtitan.optimizers.distributed_scion import DistributedScion
+from torchtitan.optimizers.distributed_scion import DiSCO
 from torchtitan.optimizers.norm_helper import calculate_norm
 from torchtitan.optimizers.scion import Scion
 
@@ -75,7 +75,7 @@ def gather_and_merge(local_stats: dict, dst: int = 0):
 
 
 def compute_grad(p, optimizer=None, **kwargs):
-    if isinstance(optimizer, (Scion, DistributedScion)):
+    if isinstance(optimizer, (Scion, DiSCO)):
         momentum = kwargs.pop("momentum")
         nesterov = kwargs.pop("nesterov")
         g = optimizer.get_momentum_or_grad(
@@ -137,7 +137,7 @@ def get_parameter_norms(model_parts, optimizers, norms_to_log):
         # NB: assumes correspondences between model parts and optimizers
         optimizer = optimizers[i]
         for group in optimizer.param_groups:
-            if isinstance(optimizer, (Scion, DistributedScion)):
+            if isinstance(optimizer, (Scion, DiSCO)):
                 param_kwargs = {
                     "momentum": group["momentum"],
                     "nesterov": group["nesterov"],
