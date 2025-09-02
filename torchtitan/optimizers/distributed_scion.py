@@ -331,6 +331,23 @@ class DistributedScion(torch.optim.Optimizer):
         zeropower_backend,
         backend_steps,
     ):
+        """
+        Supported Weight Types:
+            - 1-D tensors: Bias vectors (Linear/Convolution layers)
+            - 2-D tensors: Linear layer weights [D_out, D_in]
+            - 3-D tensors: Grouped expert weights [G, D_in, D_out] or [G, D_out, D_in]
+            - 4-D tensors: Conv2D weights [D_out, D_in, KH, KW] (forced to "conv_spectral")
+            - 5-D tensors: Conv3D weights [D_out, D_in, KH, KW, KD] (forced to "conv_spectral")
+
+        Limitations:
+            - Does not support learnable RMS/Layer-norm parameters
+            - Does not support shared experts in format [D_in, D_out * n_shared_experts], where n_shared_experts > 1
+            - Does not support Conv1D layers
+
+        Note:
+            - For 3-D expert weights, the layout must be specified during optimizer initialization.
+            - 0-D (scalar) weights is supported but should not appear in this function call
+        """
         g = g.to_local() if isinstance(g, DTensor) else g
 
         # NB: make sure this function does not modify the grad inplace
@@ -360,18 +377,19 @@ class DistributedScion(torch.optim.Optimizer):
             else:
                 pass
         elif g.ndim == 1:
-            if zeropower_backend != "identity":
+            if zeropower_backend != "bias_rms":
                 g_diag = torch.diag_embed(g).contiguous()
                 result_diag = _lmo_for_2d_tensor(g_diag)
                 g = result_diag.diagonal().contiguous()
             else:
-                g = _lmo_for_2d_tensor(g)
+                g = self.normalise_grad(g, norm_factor="bias_rms", eps=eps)
+                pass
 
-            # TODO(JSC): JUST HARD CODE IT TO USE 'identity' backend and 'bias_rms' norm_factor for
-            # now until we add regex to extra the norm's weights
-            # zeropower_backend = "identity"
-            # norm_factor = "bias_rms"
-            # g = _lmo_for_2d_tensor(g)
+        elif g.ndim == 4 or g.ndim == 5:
+            g = zeropower_backends[zeropower_backend](
+                g.reshape(len(g), -1), steps=backend_steps, eps=eps
+            ).view(g.shape)
+            g = self.normalise_grad(g, norm_factor="conv_spectral", eps=eps)
 
         else:
             raise ValueError(f"Unknown grad shape: {g.shape}")
@@ -408,6 +426,9 @@ class DistributedScion(torch.optim.Optimizer):
         elif norm_factor == "bias_rms":
             rms_value = torch.sqrt(g.pow(2).mean())
             g = g / (rms_value + eps)
+        elif norm_factor == "conv_spectral":
+            out_channels, in_channels, k, _ = g.shape
+            g *= (out_channels / in_channels) ** 0.5 / (k**2)
         elif norm_factor == "none":
             pass
         else:
