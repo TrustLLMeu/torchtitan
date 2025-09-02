@@ -698,7 +698,11 @@ def build_optimizers_with_moe_load_balancing(
             for block in part.layers.values():
                 if not block.moe_enabled:
                     continue
+<<<<<<< HEAD
                 moe = block.moe
+=======
+                moe = getattr(block, "moe", block.moe)
+>>>>>>> 4d91dce9 (sync some upstream changes.  and rename .ffn of moe to .moe align up steram,  re-use the apply_FSDP from llama4 for our model)
                 # Assuming num_experts is the same for all, so we can just grab it once
                 num_experts = moe.tokens_per_expert.numel()
                 moe_layers_info.append(
