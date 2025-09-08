@@ -7,11 +7,8 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
-import torch
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -23,10 +20,11 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp
 from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
     apply_ddp,
     PrepareMidNormInputOutput,
 )
@@ -39,13 +37,6 @@ def parallelize_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    """
-    Apply tensor parallelism, activation checkpointing, torch.compile, and data
-    parallelism to the model.
-
-    NOTE: The passed-in model preferably should be on meta device. Otherwise,
-    the model must fit on GPU or CPU memory.
-    """
     world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
@@ -57,10 +48,8 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if (
-        job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.use_flex_attn
-    ):
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
@@ -73,24 +62,27 @@ def parallelize_llama(
             "rowwise_with_gw_hp",
         )
 
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+        if enable_float8_tensorwise_tp:
+            # TODO(jianiw): This branch needs to be tested and enabled
+            raise NotImplementedError(
+                "Currently, float8 tensorwise TP is not tested for deepseekv3"
+            )
 
         enable_approx_mid_norm_for_tensor_parallel = (
             job_config.parallelism.enable_approx_mid_norm_for_tensor_parallel
         )
+        tp_only_attention = job_config.parallelism.tensor_parallel_only_attention
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            tensor_parallel_only_attention=job_config.parallelism.tensor_parallel_only_attention,
+            tensor_parallel_only_attention=tp_only_attention,
             enable_approx_mid_norm_for_tensor_parallel=enable_approx_mid_norm_for_tensor_parallel,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
-    tp_only_attention = job_config.parallelism.tensor_parallel_only_attention
+
     # I dont think we need to apply TP for MOE?
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -105,18 +97,26 @@ def parallelize_llama(
                 and parallel_dims.etp_enabled
                 else None
             ),
+            etp_enabled=parallel_dims.etp_enabled,
             tp_only_attention=tp_only_attention,
         )
-
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+
+    if job_config.activation_checkpoint.mode != "none":
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled,
+            use_flex_attn,
+        )
+
     if model_compile_enabled:
         apply_compile(model, ep_enabled=parallel_dims.ep_enabled)
+
+    dp_mesh: DeviceMesh | None = None
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -124,6 +124,8 @@ def parallelize_llama(
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
+
+        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
         dp_mod_ep_mesh_dim_names = []
@@ -134,7 +136,7 @@ def parallelize_llama(
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -143,7 +145,7 @@ def parallelize_llama(
             ep_degree=parallel_dims.ep,
             dp_mod_ep_mesh=(
                 world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if dp_mod_ep_mesh_dim_names
+                if parallel_dims.ep_enabled
                 else None
             ),
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
@@ -162,13 +164,13 @@ def parallelize_llama(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
+        dp_mesh = world_mesh
         apply_ddp(
             model,
-            world_mesh,
+            dp_mesh,
             enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
-
     return model
 
 
@@ -293,6 +295,7 @@ def apply_moe_ep_tp(
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
+    etp_enabled: bool,
     tp_only_attention: bool = False,
     enable_approx_mid_norm_for_tensor_parallel: bool = False,
 ):
@@ -355,12 +358,22 @@ def apply_moe_ep_tp(
             transformer_block.moe.experts.expert_per_rank = ep_per_rank
             transformer_block.moe.experts.ep_size = ep_world_size
 
-        else:  # EP + TP
+        elif etp_enabled:  # EP + TP
             # DONT THINK WE NEED THIS
             # TODO(JSC): DO we really want to run TP for MoE?
             raise NotImplementedError("Maybe we dont need TP for MoE")
             # experts_mesh = ep_tp_mesh
             # experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+        else:
+            experts_mesh = ep_mesh
+            # input / output sharding on the batch / tokens dim
+            experts_plan = ExpertParallel()
+            transformer_block.moe.experts.ep_enable = True
+            total_experts = transformer_block.moe.experts.num_experts
+            ep_world_size = ep_mesh.size()
+            ep_per_rank = total_experts // ep_world_size
+            transformer_block.moe.experts.expert_per_rank = ep_per_rank
+            transformer_block.moe.experts.ep_size = ep_world_size
 
         if experts_mesh:
             parallelize_module(
@@ -375,7 +388,6 @@ def apply_compile(model: nn.Module, ep_enabled: bool):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    torch._dynamo.config.capture_scalar_outputs = True
 
     for layer_id, transformer_block in model.layers.named_children():
         # we dont do compile when EP enabled
@@ -386,95 +398,3 @@ def apply_compile(model: nn.Module, ep_enabled: bool):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
-
-
-def apply_fsdp(
-    model: nn.Module,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    pp_enabled: bool,
-    cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",
-    ep_degree: int = 1,
-    dp_mod_ep_mesh: DeviceMesh | None = None,
-    gradient_divide_factor: int | None = None,
-):
-    """
-    Apply data parallelism (via FSDP2) to the model.
-
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
-    """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
-
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
-
-    if model.tok_embeddings is not None:
-        fully_shard(
-            model.tok_embeddings,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-
-    for layer_id, transformer_block in model.layers.items():
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
-        if transformer_block.moe_enabled and ep_degree > 1:
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-            fully_shard(
-                transformer_block.moe.experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-
-            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
-            #       a different size than other parameters, the gradient division
-            #       factor should be consistent with data.
-            transformer_block.moe.experts.set_reduce_scatter_divide_factor(
-                gradient_divide_factor,
-            )
-            transformer_block.moe.experts.ep_enable = True
-
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-    # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
-        fully_shard(
-            [model.norm, model.output],
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
-        )
-    fully_shard(model, **fsdp_config)
