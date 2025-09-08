@@ -189,6 +189,16 @@ class DistributedScion(torch.optim.Optimizer):
             for param in group["params"]:
                 self.parameters_to_groups[id(param)] = group_idx
 
+                # check sanity of MoE, do not allow the Shard(1) for grouped experts
+                if (
+                    param.ndim == 3
+                    and self.expert_enabled
+                    and Shard(1) in param.placements
+                ):
+                    raise NotImplementedError(
+                        "we should now allow the Shard(1) for grouped experts"
+                    )
+
             if self.is_light and nesterov:
                 raise RuntimeError(
                     "Nesterov momentum is not supported for Scion's light mode. "
