@@ -78,7 +78,7 @@ class TransformerBlock(nn.Module):
         self.moe_enabled = layer_id >= model_args.n_dense_layers
 
         if self.moe_enabled:
-            self.feed_forward = MoE(
+            self.moe = MoE(
                 layer_id,
                 dim=model_args.dim,
                 multiple_of=model_args.multiple_of,
@@ -172,7 +172,7 @@ class TransformerBlock(nn.Module):
         )
 
         if self.moe_enabled:
-            mlp_output, moe_aux_loss = self.feed_forward(self.ffn_norm(h))
+            mlp_output, moe_aux_loss = self.moe(self.ffn_norm(h))
         else:
             mlp_output = self.feed_forward(self.ffn_norm(h))
             moe_aux_loss = torch.tensor(0.0, device=x.device, pin_memory=True)
@@ -189,13 +189,21 @@ class TransformerBlock(nn.Module):
             residual_div=self.residual_div,
             init_fn_type=self.weight_init_fn_type,
         )
-        self.feed_forward.init_weights(
-            self.weight_init_std,
-            residual_div=self.residual_div,
-            init_gate_as_residual=self.init_gate_as_residual,
-            init_fn_type=self.weight_init_fn_type,
-            router_init_fn_type=self.router_init_fn_type,
-        )
+        if self.moe_enabled:
+            self.moe.init_weights(
+                self.weight_init_std,
+                residual_div=self.residual_div,
+                init_gate_as_residual=self.init_gate_as_residual,
+                init_fn_type=self.weight_init_fn_type,
+                router_init_fn_type=self.router_init_fn_type,
+            )
+        else:
+            self.feed_forward.init_weights(
+                self.weight_init_std,
+                residual_div=self.residual_div,
+                init_gate_as_residual=self.init_gate_as_residual,
+                init_fn_type=self.weight_init_fn_type,
+            )
 
     def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
         self.attention.init_kv_cache(max_batch_size, max_seq_length)

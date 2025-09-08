@@ -687,9 +687,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers.join_log_queue()
         for model_part in self.model_parts:
             for layer in model_part.layers.values():
-                if not hasattr(layer.feed_forward, "_log_expert_metrics"):
+                if not hasattr(layer, "moe") or not hasattr(
+                    layer.moe, "_log_expert_metrics"
+                ):
                     continue
-                extra_metrics.update(layer.feed_forward._log_expert_metrics)
+                extra_metrics.update(layer.moe._log_expert_metrics)
 
         self.metrics_processor.log(
             self.step,
