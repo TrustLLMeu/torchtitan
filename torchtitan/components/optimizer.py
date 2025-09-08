@@ -698,7 +698,7 @@ def build_optimizers_with_moe_load_balancing(
             for block in part.layers.values():
                 if not block.moe_enabled:
                     continue
-                moe = getattr(block, "moe", block.feed_forward)
+                moe = block.moe
                 # Assuming num_experts is the same for all, so we can just grab it once
                 num_experts = moe.tokens_per_expert.numel()
                 moe_layers_info.append(

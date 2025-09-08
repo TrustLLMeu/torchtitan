@@ -59,7 +59,6 @@ class FeedForward(nn.Module):
         residual_div: float,
         init_gate_as_residual: bool,
         init_fn_type: str,
-        **kwargs,
     ):
         init_fn = build_init_fn(init_fn_type)
         init_fn(self.w1.weight, mean=0.0, std=init_std)

@@ -268,7 +268,7 @@ def apply_non_moe_tp(
                 }
             )
 
-            if not isinstance(transformer_block.feed_forward.out_norm, nn.Identity):
+            if not isinstance(transformer_block.moe.out_norm, nn.Identity):
                 if enable_approx_mid_norm_for_tensor_parallel:
                     layer_plan["feed_forward.out_norm"] = SequenceParallel(
                         sequence_dim=-1
@@ -348,12 +348,12 @@ def apply_moe_ep_tp(
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-            transformer_block.feed_forward.experts.ep_enable = True
-            total_experts = transformer_block.feed_forward.experts.num_experts
+            transformer_block.moe.experts.ep_enable = True
+            total_experts = transformer_block.moe.experts.num_experts
             ep_world_size = ep_mesh.size()
             ep_per_rank = total_experts // ep_world_size
-            transformer_block.feed_forward.experts.expert_per_rank = ep_per_rank
-            transformer_block.feed_forward.experts.ep_size = ep_world_size
+            transformer_block.moe.experts.expert_per_rank = ep_per_rank
+            transformer_block.moe.experts.ep_size = ep_world_size
 
         else:  # EP + TP
             # DONT THINK WE NEED THIS
@@ -364,7 +364,7 @@ def apply_moe_ep_tp(
 
         if experts_mesh:
             parallelize_module(
-                module=transformer_block.feed_forward.experts,
+                module=transformer_block.moe.experts,
                 device_mesh=experts_mesh,
                 parallelize_plan=experts_plan,
             )
@@ -451,7 +451,7 @@ def apply_fsdp(
             fsdp_mod_ep_config = fsdp_config.copy()
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
             fully_shard(
-                transformer_block.feed_forward.experts,
+                transformer_block.moe.experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
             )
@@ -459,10 +459,10 @@ def apply_fsdp(
             # NOTE: # Although the FSDP sharding of experts is done on a mesh of
             #       a different size than other parameters, the gradient division
             #       factor should be consistent with data.
-            transformer_block.feed_forward.experts.set_reduce_scatter_divide_factor(
+            transformer_block.moe.experts.set_reduce_scatter_divide_factor(
                 gradient_divide_factor,
             )
-            transformer_block.feed_forward.experts.ep_enable = True
+            transformer_block.moe.experts.ep_enable = True
 
         fully_shard(
             transformer_block,
