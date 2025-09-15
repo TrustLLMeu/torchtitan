@@ -116,9 +116,9 @@ class MoEModelArgs(BaseModelArgs):
 
         # Normalize `depth_init`.
         depth_init = job_config.model.depth_init.lower()
-        if depth_init == ["true", "depth"]:
+        if depth_init in ["true", "depth"]:
             depth_init = True
-        elif depth_init == ["false", "total_depth"]:
+        elif depth_init in ["false", "total_depth"]:
             depth_init = False
         elif depth_init in ["none", "null", "identity"]:
             depth_init = None
