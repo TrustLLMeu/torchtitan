@@ -222,6 +222,6 @@ def calculate_norm(
         norms = fused_metrics(W)
         norms = {norm_name: norms[norm_name] for norm_name in norms_to_log}
     else:
-        norms = {norm_name: NORM_FUNCTIONS[W] for norm_name in norms_to_log}
+        norms = {norm_name: NORM_FUNCTIONS[norm_name](W) for norm_name in norms_to_log}
 
     return norms

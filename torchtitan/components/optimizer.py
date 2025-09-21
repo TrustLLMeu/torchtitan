@@ -88,7 +88,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         self.preserve_lrs_when_loading = False
         self.norms_to_log: list[str] | None = None
         self.log_queue: queue.Queue | None = None
-        self.log_thread: threading.Thead | None = None
+        self.log_thread: threading.Thread | None = None
 
         for model in self.model_parts:
             if issubclass(optimizer_cls, DiSCO):
@@ -557,11 +557,12 @@ def build_optimizers_with_moe_load_balancing(
                 #     scale_factor = 0.5
                 acc_fwd_times_buffers.append(moe.acc_fwd_times)
 
-        # assume all MoE layers are same
-        scale_factor = acc_fwd_times_buffers[-1]
         # Early exit if no MoE layers were found
         if not moe_layers_info:
             return
+
+        # assume all MoE layers are same
+        scale_factor = acc_fwd_times_buffers[-1]
 
         all_tokens = torch.cat(tok_buffers)
         all_entropies = torch.cat(ent_buffers)
@@ -650,9 +651,9 @@ def build_optimizers_with_moe_load_balancing(
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
-                if not transformer_block.moe_enabled:
-                    return False
-        return True
+                if transformer_block.moe_enabled:
+                    return True
+        return False
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
