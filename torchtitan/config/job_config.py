@@ -248,32 +248,23 @@ class Optimizer:
     is_light: bool = False
     """Whether to use Scion's light (memory-saving) version"""
 
+    norm_factor: str = "spectral"
+    """Which norm factor to use"""
+
     zeropower_backend: str = "newtonschulz5"
     "Which `zeropower_backend` to use."
 
     backend_steps: int = 5
-    """Number of steps for the Scion backend"""
+    """Number of steps for the DiSCO backend"""
 
     momentum: float = 0.95
-    """Scion momentum to use"""
+    """DiSCO momentum to use"""
 
     nesterov: bool = False
-    """Whether to use Nesterov momentum in Scion"""
+    """Whether to use Nesterov momentum in DiSCO"""
 
-    embed_lr: float | None = None
-    """Embedding layer learning rate"""
-
-    unembed_lr: float | None = None
-    """Unembedding layer learning rate"""
-
-    embed_str_match: str | None = None
-    """String to match for embedding layer parameter group"""
-
-    unembed_str_match: str | None = None
-    """String to match for unembedding layer parameter group"""
-
-    router_str_match: str | None = None
-    """String to match for MoE router layer parameter group"""
+    extra_param_group_split_rules: list[dict[str, Any]] | None = None
+    """Extra parameter group splitting rules for DiSCO optimizers"""
 
     implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     """

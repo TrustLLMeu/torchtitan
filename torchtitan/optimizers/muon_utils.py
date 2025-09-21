@@ -23,17 +23,31 @@ from .newton_schulz_triton import newton_schulz_triton, polar_express_triton
 
 def zeropower_via_svd(G, **kwargs):
     original_dtype = G.dtype
-    G = G.to(torch.float32)
-    # SVD does not support bfloat16
-    if G.size(0) > G.size(1):
-        G = G.T
-        transpose = True
-    else:
-        transpose = False
-    U, S, V = G.svd()
-    X = U @ V.T
-    if transpose:
-        X = X.T
+    is_2d = G.dim() == 2
+    if is_2d:
+        G = G.unsqueeze(0)  # batch of 1
+
+    assert G.dim() == 3, f"Expected 2D or 3D tensor, got {G.shape}"
+
+    G32 = G.to(torch.float32)  # SVD does not support bfloat16 reliably
+    rows, cols = G32.shape[-2], G32.shape[-1]
+    transposed = rows > cols
+    if transposed:
+        G32 = G32.transpose(-2, -1)
+
+    X_list = []
+    for b in range(G32.shape[0]):
+        U, S, V = G32[b].svd()  # per-matrix SVD (matches your API choice)
+        Xb = U @ V.t()  # orthogonal factor
+        X_list.append(Xb)
+
+    X = torch.stack(X_list, dim=0)
+
+    if transposed:
+        X = X.transpose(-2, -1)
+    if is_2d:
+        X = X.squeeze(0)
+
     return X.to(original_dtype).contiguous()
 
 
@@ -41,6 +55,14 @@ def zeropower_via_svd(G, **kwargs):
 @torch.compile
 def zeropower_via_polar_express(G, steps=5, eps=1e-7):
     # https://arxiv.org/abs/2505.16932
+    # Support 2D (unsqueezed to batch=1) and 3D inputs.
+    is_2d = G.dim() == 2
+    if is_2d:
+        G = G.unsqueeze(0)
+    assert (
+        G.dim() == 3
+    ), f"Please make sure gradients are 2D or 3D tensors, got shape: {G.shape}"
+
     coeffs_base = [
         (8.28721201814563, -23.595886519098837, 17.300387312530933),
         (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
@@ -52,31 +74,39 @@ def zeropower_via_polar_express(G, steps=5, eps=1e-7):
         (1.875000000000000, -1.250000000000000, 0.375000000000000),  # limit
     ]
 
-    # apply the 1/1.01 stabiliser **only** to the first seven triples
+    # apply the 1/1.01 stabiliser only to the first seven triples
     coeffs_base = [
-        (a / 1.01, b / 1.01**3, c / 1.01**5) for (a, b, c) in coeffs_base[:-1]
+        (a / 1.01, b / (1.01**3), c / (1.01**5)) for (a, b, c) in coeffs_base[:-1]
     ] + [coeffs_base[-1]]
-
-    # extend the list so that coeffs[k] is defined for every k < steps
     coeffs = coeffs_base + list(
         repeat(coeffs_base[-1], max(0, steps - len(coeffs_base)))
     )
 
     original_dtype = G.dtype
     X = G.bfloat16()
-    if G.size(0) > G.size(1):
-        X = X.T
-    X = X / (torch.linalg.norm(X) * 1.01 + eps)  # ensure top singular value <= 1
 
-    # main loop
+    # Transpose whole batch if rows > cols (same rule as your 2D version).
+    rows, cols = X.shape[-2], X.shape[-1]
+    transposed = False
+    if rows > cols:
+        X = X.transpose(1, 2)
+        transposed = True
+
+    # Per-matrix normalisation; matches your scalar normalisation when batch=1.
+    norm = torch.linalg.norm(X, dim=(-2, -1), keepdim=True)
+    X = X / (norm * 1.01 + eps)  # ensure top singular value <= 1
+
+    # Main loop (batched matmuls).
     for k in range(steps):
         a, b, c = coeffs[k]
-        A = X @ X.T
-        B = b * A + c * A @ A
-        X = a * X + B @ X
+        A = torch.bmm(X, X.transpose(1, 2))
+        B = b * A + c * torch.bmm(A, A)
+        X = a * X + torch.bmm(B, X)
 
-    if G.size(0) > G.size(1):
-        X = X.T
+    if transposed:
+        X = X.transpose(1, 2)
+    if is_2d:
+        X = X.squeeze(0)
 
     return X.to(original_dtype)
 
@@ -94,31 +124,48 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     """
 
     assert (
-        len(G.shape) == 2
+        len(G.shape) == 2 or len(G.shape) == 3
     ), f"Please make sure gradients are 2D tensors to use NS, got shape: {G.shape}"
+
+    is_2d = len(G.shape) == 2
+    if is_2d:
+        G = G.unsqueeze(0)
+
+    assert (
+        len(G.shape) == 3
+    ), f"Please make sure gradients are 2D or 3D tensors, got shape: {G.shape}"
+
     a, b, c = (3.4445, -4.7750, 2.0315)
-    #     for a, b, c in [ # updated coefficients from @leloykun
-    #     (4.0848, -6.8946, 2.9270),
-    #     (3.9505, -6.3029, 2.6377),
-    #     (3.7418, -5.5913, 2.3037),
-    #     (2.8769, -3.1427, 1.2046),
-    #     (2.8366, -3.0525, 1.2012),
-    # ]:
     original_dtype = G.dtype
     X = G.bfloat16()
-    if G.size(0) > G.size(1):
-        X = X.T
-    X = X / (torch.linalg.norm(X) + eps)  # ensure top singular value <= 1
 
+    # Determine if we need to transpose the matrices based on their dimensions
+    rows, cols = X.shape[-2], X.shape[-1]
+    transposed = False
+    if rows > cols:
+        transposed = True
+        X = X.transpose(1, 2)
+
+    # Normalize each matrix in the batch individually
+    norm = torch.linalg.norm(X, dim=(-2, -1), keepdim=True)
+    X = X / (norm + eps)  # ensure top singular value <= 1 for each matrix
+
+    # Perform the iteration using batched matrix multiplication (torch.bmm)
     for _ in range(steps):
-        A = X @ X.T
-        B = (
-            b * A + c * A @ A
-        )  # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
+        # A = X @ X.T for a batch
+        A = torch.bmm(X, X.transpose(1, 2))
+        # B = b*A + c*A@A for a batch
+        B = b * A + c * torch.bmm(A, A)
+        # X = a*X + B@X for a batch
+        X = a * X + torch.bmm(B, X)
 
-    if G.size(0) > G.size(1):
-        X = X.T
+    # Transpose back if we did it at the beginning
+    if transposed:
+        X = X.transpose(1, 2)
+
+    # If the original input was a 2D tensor, squeeze the batch dimension out
+    if is_2d:
+        X = X.squeeze(0)
 
     return X.to(original_dtype)
 

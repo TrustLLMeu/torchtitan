@@ -553,7 +553,7 @@ def build_hf_dataloader(
             len(d) == normed_list_length
         ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
     hf_datasets = []
-    for (d_name, d_path, d_inner_name, d_split, d_key) in zip(
+    for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
         dataset_path,
         dataset_inner_name,
