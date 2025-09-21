@@ -41,7 +41,7 @@ def l1_to_rms_norm(W):
 
 
 @torch.no_grad()
-def rms_to_l1_norm(W):
+def rms_to_inf_norm(W):
     assert W.ndim == 2, "operator norm can only be applied to matrices"
     norm = torch.max(
         torch.linalg.norm(W.to(torch.float32), ord=2, dim=1, dtype=torch.float32)
@@ -96,7 +96,7 @@ def effective_rank(W):
 NORM_FUNCTIONS = {
     "rms_to_rms": rms_to_rms_norm,
     "l1_to_rms": l1_to_rms_norm,
-    "rms_to_l1": rms_to_l1_norm,
+    "rms_to_inf": rms_to_inf_norm,
     "supremum": supremum_norm,
     "condition_number": condition_number,
     "frobenius_norm": frobenius_norm,
@@ -125,7 +125,7 @@ def fused_metrics(W, eps=1e-20):
     col_l2 = colsqsum.sqrt()
 
     l1_to_rms = col_l2.max() / math.sqrt(fan_out)
-    rms_to_l1 = row_l2.max() * math.sqrt(fan_in)
+    rms_to_inf = row_l2.max() * math.sqrt(fan_in)
 
     S = torch.linalg.svdvals(Wf, driver="gesvd")
 
@@ -148,7 +148,7 @@ def fused_metrics(W, eps=1e-20):
     return {
         "rms_to_rms": spec,
         "l1_to_rms": l1_to_rms,
-        "rms_to_l1": rms_to_l1,
+        "rms_to_inf": rms_to_inf,
         "supremum": sup,
         "condition_number": cond,
         "frobenius_norm": frob_norm,
@@ -163,7 +163,7 @@ def get_norms_to_log(norms_to_log: str | list[str]) -> list[str]:
     Return a list of norms to log.
     The following contents in `norms_to_log` are special:
     - "default": replaced by
-                 ["rms_to_rms", "l1_to_rms", "rms_to_l1", "supremum", "condition_number"]
+                 ["rms_to_rms", "l1_to_rms", "rms_to_inf", "supremum", "condition_number"]
     - "all" or "everything": log all norms
     """
     if isinstance(norms_to_log, str):
@@ -182,7 +182,7 @@ def get_norms_to_log(norms_to_log: str | list[str]) -> list[str]:
             + [
                 "rms_to_rms",
                 "l1_to_rms",
-                "rms_to_l1",
+                "rms_to_inf",
                 "supremum",
                 "condition_number",
             ]

@@ -55,7 +55,7 @@ class Metrics:
     log all available norms. If "default" is specified, use the following:
     - "rms_to_rms"
     - "l1_to_rms"
-    - "rms_to_l1"
+    - "rms_to_inf"
     - "supremum"
     - "condition_number"
     """
@@ -144,7 +144,7 @@ class Model:
     factors.
     """
 
-    init_gate_as_residual = True
+    init_gate_as_residual: bool = True
     """Whether to initialize the GLU gate as if it was a residual layer."""
 
     final_out_init_fn_type: str = "trunc_normal"
