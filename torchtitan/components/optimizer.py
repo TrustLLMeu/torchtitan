@@ -643,10 +643,18 @@ def build_optimizers_with_moe_load_balancing(
                 )
                 log_queue.put(payload)
 
-    optimizers.register_step_pre_hook(
-        lambda *args, **kwargs: _update_expert_bias(
-            model_parts, parallel_dims=parallel_dims
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if not transformer_block.moe_enabled:
+                    return False
+        return True
+
+    if _should_register_moe_balancing_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallel_dims=parallel_dims
+            )
         )
-    )
 
     return optimizers
