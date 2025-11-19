@@ -83,7 +83,7 @@ def multi_token_cross_entropy_loss(
     main_loss = loss_fn(preds[0], labels[:, : job_config.training.seq_len])
 
     mtp_loss = 0
-    for (label_offset, pred) in enumerate(preds[1:], 1):
+    for label_offset, pred in enumerate(preds[1:], 1):
         loss = loss_fn(
             pred,
             labels[:, label_offset : label_offset + job_config.training.seq_len],
@@ -102,9 +102,17 @@ def moe_loss(
     """Sequence-wise auxiliary loss-enhanced loss function for MoE Transformer
     model training.
     """
-    loss = loss_fn(pred, labels)
-    if isinstance(pred, dict):
-        loss += pred["aux_loss"]
+    if isinstance(pred, dict) and "load_balance_loss" in pred:
+        loss = loss_fn(pred["tokens_list"][0], labels)
+        aux_loss = pred["load_balance_loss"]
+        # USE STE to make the magnitude of loss remain the same
+        loss = loss + (aux_loss - aux_loss.detach())
+    elif isinstance(pred, tuple):
+        pred, aux_loss = pred
+        loss = loss_fn(pred, labels)
+        loss = loss + (aux_loss - aux_loss.detach())
+    else:
+        loss = loss_fn(pred, labels)
     return loss
 
 

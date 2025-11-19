@@ -448,6 +448,7 @@ def moe_metrics_worker(log_queue: queue.Queue):
             all_usages_cpu,
             all_biases_cpu,
             all_entropies_cpu,
+            all_load_balance_losses_cpu,
             num_experts,
         ) = data
 
@@ -464,7 +465,12 @@ def moe_metrics_worker(log_queue: queue.Queue):
             pre_bias = f"moe_bias/L-{layer_id}_EP-"
             metrics.update({f"{pre_usage}{j}": v for j, v in enumerate(layer_usages)})
             metrics.update({f"{pre_bias}{j}": v for j, v in enumerate(layer_biases)})
-
+            metrics.update(
+                {
+                    f"moe_load_balance_loss/L-{layer_id}": v
+                    for v in all_load_balance_losses_cpu
+                }
+            )
             moe._log_expert_metrics = metrics
             usage_offset += num_experts
             bias_offset += num_experts
@@ -529,7 +535,7 @@ def build_optimizers_with_moe_load_balancing(
         # default compute stream. Need to assess if this is OK performance-wise.
 
         moe_layers_info = []
-        tok_buffers, ent_buffers = [], []
+        tok_buffers, ent_buffers, load_balance_loss_buffers = [], [], []
         acc_fwd_times_buffers = []
         scale_factor = 1
         num_experts = 0
@@ -552,7 +558,7 @@ def build_optimizers_with_moe_load_balancing(
                 # if need_rescale_stats(moe) or need_rescale_stats(block):
                 #     scale_factor = 0.5
                 acc_fwd_times_buffers.append(moe.acc_fwd_times)
-
+                load_balance_loss_buffers.append(moe.load_balance_loss)
         # Early exit if no MoE layers were found
         if not moe_layers_info:
             return
@@ -562,7 +568,7 @@ def build_optimizers_with_moe_load_balancing(
 
         all_tokens = torch.cat(tok_buffers)
         all_entropies = torch.cat(ent_buffers)
-
+        all_load_balance_losses = torch.cat(load_balance_loss_buffers)
         if scale_factor != 1:
             all_tokens = all_tokens // scale_factor  # tokens count are integers
             all_entropies = all_entropies / scale_factor  # entropies are floats
@@ -575,7 +581,9 @@ def build_optimizers_with_moe_load_balancing(
             torch.distributed.all_reduce(
                 all_entropies, group=pg, op=torch.distributed.ReduceOp.AVG
             )
-
+            torch.distributed.all_reduce(
+                all_load_balance_losses, group=pg, op=torch.distributed.ReduceOp.AVG
+            )
         num_layers = len(moe_layers_info)
         lens = torch.full(
             (num_layers,), num_experts, device=all_tokens.device, dtype=torch.long
@@ -622,6 +630,7 @@ def build_optimizers_with_moe_load_balancing(
                 torch._foreach_mul_(tok_buffers, 0)
                 torch._foreach_mul_(ent_buffers, 0.0)
                 torch._foreach_mul_(acc_fwd_times_buffers, 0)
+                torch._foreach_mul_(load_balance_loss_buffers, 0.0)
             except Exception:
                 for t in tok_buffers:
                     t.zero_()
@@ -629,17 +638,22 @@ def build_optimizers_with_moe_load_balancing(
                     t.zero_()
                 for t in acc_fwd_times_buffers:
                     t.zero_()
+                for t in load_balance_loss_buffers:
+                    t.zero_()
 
             if is_dp_rank_0:
                 all_usages_cpu = usage_flat.cpu().tolist()
                 all_biases_cpu = torch.cat(bias_params).cpu().tolist()
                 all_entropies_cpu = all_entropies.cpu().float().tolist()
-
+                all_load_balance_losses_cpu = (
+                    all_load_balance_losses.cpu().float().tolist()
+                )
                 payload = (
                     moe_layers_info,
                     all_usages_cpu,
                     all_biases_cpu,
                     all_entropies_cpu,
+                    all_load_balance_losses_cpu,
                     num_experts,
                 )
                 log_queue.put(payload)

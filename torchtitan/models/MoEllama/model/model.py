@@ -175,6 +175,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        accumulated_load_balance_loss: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         start_pos: int = -1,
     ):
@@ -195,14 +196,17 @@ class TransformerBlock(nn.Module):
         )
 
         if self.moe_enabled:
-            mlp_output, moe_aux_loss = self.moe(self.ffn_norm(h))
+            mlp_output, load_balance_loss = self.moe(self.ffn_norm(h))
+            accumulated_load_balance_loss = (
+                accumulated_load_balance_loss + load_balance_loss
+            )
+
         else:
             mlp_output = self.feed_forward(self.ffn_norm(h))
-            moe_aux_loss = torch.tensor(0.0, device=x.device, pin_memory=True)
 
         out = self.identity_scale * h + self.block_scale * mlp_output
 
-        return out, moe_aux_loss
+        return out, accumulated_load_balance_loss
 
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -407,6 +411,7 @@ class Transformer(nn.Module, ModelProtocol):
     def forward(
         self,
         inputs: MoEInputs,
+        accumulated_load_balance_loss: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
     ) -> MoEInputsDict:
         """
@@ -439,7 +444,6 @@ class Transformer(nn.Module, ModelProtocol):
         tokens = inputs["tokens_list"]
         start_pos = inputs.get("start_pos", -1)
         prev_embed = inputs.get("prev_embed", None)
-        total_moe_aux_loss = inputs.get("aux_loss", 0.0)
         if isinstance(tokens, list):
             tokens = tokens[0]
 
@@ -462,17 +466,21 @@ class Transformer(nn.Module, ModelProtocol):
         else:
             freqs_cis = self.freqs_cis
 
+        accumulated_load_balance_loss = (
+            torch.zeros((), device=h.device, dtype=torch.float32)
+            if accumulated_load_balance_loss is None
+            else accumulated_load_balance_loss
+        )
+
         for layer in self.layers.values():
-            h, moe_aux_loss = layer(h, freqs_cis, attention_masks, start_pos=start_pos)
-            total_moe_aux_loss += moe_aux_loss
+            h, accumulated_load_balance_loss = layer(
+                h,
+                freqs_cis,
+                accumulated_load_balance_loss,
+                attention_masks,
+                start_pos=start_pos,
+            )
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
-        # PP compatibility hack
-        if self.model_args.moe_args.load_balance_loss_weight > 0:
-            return {
-                "tokens_list": [output],
-                "aux_loss": total_moe_aux_loss,
-            }
-        else:
-            return output
+        return output, accumulated_load_balance_loss
