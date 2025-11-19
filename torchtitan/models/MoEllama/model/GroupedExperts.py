@@ -8,14 +8,52 @@ from typing import Callable
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.expert_parallel import expert_parallel
 from torchtitan.models.activations import build_activation
 from torchtitan.models.inits import build_init_fn
+from torchtitan.models.moe.utils import indices_padding_wrapper
 from torchtitan.models.norms import build_norm
 
 
-@expert_parallel
+def _run_experts_for_loop(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    activation: Callable,
+    mid_norm: nn.Module,
+) -> torch.Tensor:
+    # NOTE: this would incur a synchronization between device and host
+    num_tokens_per_expert = num_tokens_per_expert.tolist()
+
+    # side-effect code due to the usage of generate_permute_indices
+    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+    # a tuple of tensors indexed by experts
+    # each with shape (tokens_per_expert(varying), dim)
+    x = torch.split(
+        x[: sum(num_tokens_per_expert)],
+        split_size_or_sections=num_tokens_per_expert,
+        dim=0,
+    )
+    out_experts_splits = []
+    for expert_idx, x_expert in enumerate(x):
+        h = activation(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
+        h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+        h = mid_norm(h)
+        h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
+        # h shape (tokens_per_expert(varying), dim)
+        out_experts_splits.append(h)
+    out = torch.cat(out_experts_splits, dim=0)
+
+    # side-effect code due to the usage of generate_permute_indices
+    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+
+    return out
+
+
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -23,15 +61,19 @@ def _run_experts_grouped_mm(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
     activation: Callable,
-    out_norm: nn.Module,
+    mid_norm: nn.Module,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-    # grouped mm between a 2D tensor and a 3D tensor
-    assert x.dim() == 2
 
-    h = activation(torch._grouped_mm(x, w1.transpose(-2, -1), offs=offsets))
-    h = h * torch._grouped_mm(x, w3.transpose(-2, -1), offs=offsets)
-    out = torch._grouped_mm(out_norm(h), w2.transpose(-2, -1), offs=offsets)
+    h = activation(
+        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+    )
+    h = h * torch._grouped_mm(
+        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+    )
+    out = torch._grouped_mm(
+        mid_norm(h), w2.bfloat16().transpose(-2, -1), offs=offsets
+    ).type_as(x)
 
     return out
 
@@ -72,6 +114,8 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim_in, dim_hidden))
         self.w3 = nn.Parameter(torch.empty(num_experts, dim_hidden, dim_in))
 
+        self.use_grouped_mm = True
+
         self.act_fn = build_activation(activation_type)
 
         # when ep is enabled, this is set in parallelize.py
@@ -86,9 +130,9 @@ class GroupedExperts(nn.Module):
             assert (
                 norm_eps is not None
             ), "`norm_eps` needs to be passed when `norm_everywhere=True`"
-            self.out_norm = build_norm(norm_type, dim=dim_hidden, eps=norm_eps)
+            self.mid_norm = build_norm(norm_type, dim=dim_hidden, eps=norm_eps)
         else:
-            self.out_norm = nn.Identity()
+            self.mid_norm = nn.Identity()
 
     def __repr__(self):
         model_str = f"GroupedExperts(dim_in={self.dim_in}, hidden={self.dim_hidden},\n"
@@ -99,24 +143,56 @@ class GroupedExperts(nn.Module):
         model_str += f"\tup_proj={self.w1.shape}, \n"
         model_str += f"\tgate_proj={self.w3.shape}, \n"
         model_str += f"\tdown_proj={self.w2.shape}, \n"
-        model_str += f"\tout_norm={self.out_norm}, \n"
+        model_str += f"\tmid_norm={self.mid_norm}, \n"
         model_str += ")"
         return model_str
 
     def forward(
         self,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.LongTensor,
+        num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        return _run_experts_grouped_mm(
-            self.w1,
-            self.w2,
-            self.w3,
-            x,
-            num_tokens_per_expert,
-            activation=self.act_fn,
-            out_norm=self.out_norm,
-        )
+        if isinstance(self.w1, DTensor):
+            # Convert parameters from DTensors to plain Tensors, to work with
+            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
+            w1 = self.w1.to_local()
+            w2 = self.w2.to_local()
+            w3 = self.w3.to_local()
+        else:
+            w1 = self.w1
+            w2 = self.w2
+            w3 = self.w3
+
+        if self.use_grouped_mm:
+            # NOTE: If EP is not used, we need to pad the indices
+            #       to prepare for grouped_mm;
+            #       otherwise, EP will handle the padding.
+            if (
+                not isinstance(self.w1, DTensor)
+                or "ep" not in self.w1.device_mesh.mesh_dim_names
+            ):
+                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
+            else:
+                run_experts_fn = _run_experts_grouped_mm
+            return run_experts_fn(
+                w1,
+                w2,
+                w3,
+                x,
+                num_tokens_per_expert,
+                activation=self.act_fn,
+                mid_norm=self.mid_norm,
+            )
+        else:
+            return _run_experts_for_loop(
+                w1,
+                w2,
+                w3,
+                x,
+                num_tokens_per_expert,
+                activation=self.act_fn,
+                mid_norm=self.mid_norm,
+            )
 
     def init_weights(
         self,
@@ -144,8 +220,8 @@ class GroupedExperts(nn.Module):
             layer_id=self.layer_id,
         )
 
-        if not isinstance(self.out_norm, nn.Identity):
-            self.out_norm.reset_parameters()
+        if not isinstance(self.mid_norm, nn.Identity):
+            self.mid_norm.reset_parameters()
 
 
 def make_seed_from_global(

@@ -5,8 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-import torch.distributed.tensor
 from torch import nn
+from torch.nn.attention.flex_attention import and_masks
+from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.distributed.utils import get_param_dtype
+from torchtitan.models.attention import (
+    create_attention_mask,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+)
 
 from torchtitan.models.inits import build_init_fn
 from torchtitan.models.inputs import MoEInputs, MoEInputsDict
@@ -17,6 +24,7 @@ from torchtitan.models.llama3.model.model import (
     # repeat_kv,
 )
 from torchtitan.models.norms import build_norm
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
 
@@ -45,53 +53,57 @@ class TransformerBlock(nn.Module):
 
     """
 
-    attention_cls = Attention
-
     def __init__(self, layer_id: int, model_args: MoEModelArgs):
         super().__init__()
         self.layer_id = layer_id
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
-        self.attention = self.attention_cls(model_args)
+        self.attention = Attention(model_args)
         # if self.attention_cls is Attention:
         #     self.attention.forward = torch.compile(
         #         self.attention.forward, fullgraph=True
         #     )
+
+        moe_args = model_args.moe_args
         # TODO(JSC): Need ablation, feels like this does not really matter
-        if model_args.moe_router_scaling_factor is None:
-            router_scaling_factor = calc_gate_scaling_factor(
-                model_args.n_routed_experts,
-                model_args.activate_experts,
+        if moe_args.scaling_factor is None:
+            scaling_factor = calc_gate_scaling_factor(
+                moe_args.num_routed_experts,
+                moe_args.activate_experts,
                 iter_times=10_000,
             )
             if layer_id == 0:
-                logger.info(
-                    f"Auto-computed router_scaling_factor: {router_scaling_factor}"
-                )
+                logger.info(f"Auto-computed router_scaling_factor: {scaling_factor}")
         else:
-            router_scaling_factor = model_args.moe_router_scaling_factor
+            scaling_factor = moe_args.scaling_factor
             if layer_id == 0:
                 logger.info(
-                    f"Using manually set router_scaling_factor: {router_scaling_factor}"
+                    f"Using manually set router_scaling_factor: {scaling_factor}"
                 )
+        moe_args.scaling_factor = scaling_factor
 
         self.moe_enabled = layer_id >= model_args.n_dense_layers
 
         if self.moe_enabled:
+
+            match_dim_with_dense = True
+            if match_dim_with_dense:
+                ratio = 1.0 / (moe_args.top_k + moe_args.num_shared_experts)
+            else:
+                ratio = 1.0
+
+            hidden_dim = 2 * 4 * model_args.dim / 3
+            if model_args.ffn_dim_multiplier is not None:
+                hidden_dim = model_args.ffn_dim_multiplier * hidden_dim
+            hidden_dim = int(hidden_dim * ratio)
+            hidden_dim = hidden_dim - hidden_dim % model_args.multiple_of
+
             self.moe = MoE(
                 layer_id,
-                dim=model_args.dim,
-                multiple_of=model_args.multiple_of,
-                ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+                model_args.dim,
+                hidden_dim,
+                moe_args,
                 activation_type=model_args.activation_type,
-                n_shared_experts=model_args.n_shared_experts,
-                n_routed_experts=model_args.n_routed_experts,
-                activate_experts=model_args.activate_experts,
-                bias_update_speed=model_args.moe_router_bias_update_speed,
-                aux_loss_alpha=model_args.moe_aux_loss_alpha,
-                bias_update_norm_factor=model_args.moe_router_bias_update_norm_factor,
-                match_dim_with_dense=True,
-                router_scaling_factor=router_scaling_factor,
                 norm_everywhere=model_args.norm_everywhere,
                 norm_type=model_args.norm_type,
                 norm_eps=model_args.norm_eps,
@@ -118,45 +130,53 @@ class TransformerBlock(nn.Module):
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
-        self.weight_init_fn_type = model_args.intermediate_init_fn_type
+        model_init_args = model_args.model_init_args
+        self.weight_init_fn_type = model_init_args.intermediate_init_fn_type
         self.weight_init_std = (
-            model_args.intermediate_init_std
-            * model_args.dim**model_args.intermediate_exp
+            model_init_args.intermediate_init_std
+            * model_args.dim**model_init_args.intermediate_exp
         )
-        self.router_init_fn_type = model_args.router_init_fn_type
-        self.init_gate_as_residual = model_args.init_gate_as_residual
+        self.router_init_fn_type = model_init_args.router_init_fn_type
+        self.init_gate_as_residual = model_init_args.init_gate_as_residual
 
         # x  = identity_scale * x + block_scale * block(x)
-        if model_args.depth_init is None:
-            self.residual_div_attn = 1.0
-            self.residual_div_ffn = 1.0
-        elif model_args.depth_init == "relative_depth":
-            self.residual_div_attn = (2 * (layer_id + 1)) ** 0.5
-            self.residual_div_ffn = (2 * (layer_id + 2)) ** 0.5
-        elif model_args.depth_init == "total_depth":
-            self.residual_div_attn = (2 * model_args.n_layers) ** 0.5
-            self.residual_div_ffn = (2 * model_args.n_layers) ** 0.5
-        else:
-            raise ValueError(f"Invalid depth_init: {model_args.depth_init}")
 
-        if model_args.residual_scale == "depth_scale":
-            total_depth = 2 * model_args.n_layers
-            self.block_scale = 1 / total_depth
-            self.identity_scale = (total_depth - 1) / total_depth
-        elif model_args.residual_scale == "complete_p":
-            total_depth = 2 * model_args.n_layers
-            self.block_scale = 1 / total_depth
-            self.identity_scale = 1.0
-        elif model_args.residual_scale == "identity":
-            self.block_scale = 1.0
-            self.identity_scale = 1.0
-        else:
-            raise ValueError(f"Invalid residual_scale: {model_args.residual_scale}")
+        match model_init_args.depth_init:
+            case "relative_depth":
+                self.residual_div_attn = (2 * (layer_id + 1)) ** 0.5
+                self.residual_div_ffn = (2 * (layer_id + 2)) ** 0.5
+            case "total_depth":
+                self.residual_div_attn = (2 * model_args.n_layers) ** 0.5
+                self.residual_div_ffn = (2 * model_args.n_layers) ** 0.5
+            case None:
+                self.residual_div_attn = 1.0
+                self.residual_div_ffn = 1.0
+            case _:
+                raise ValueError(f"Invalid depth_init: {model_init_args.depth_init}")
+
+        match model_init_args.residual_scale:
+            case "depth_scale":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = (total_depth - 1) / total_depth
+            case "complete_p":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = 1.0
+            case "identity":
+                self.block_scale = 1.0
+                self.identity_scale = 1.0
+            case _:
+                raise ValueError(
+                    f"Invalid residual_scale: {model_init_args.residual_scale}"
+                )
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        start_pos: int = -1,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -171,7 +191,7 @@ class TransformerBlock(nn.Module):
         """
 
         h = self.identity_scale * x + self.block_scale * self.attention(
-            self.attention_norm(x), freqs_cis
+            self.attention_norm(x), freqs_cis, attention_masks, start_pos=start_pos
         )
 
         if self.moe_enabled:
@@ -289,15 +309,16 @@ class Transformer(nn.Module, ModelProtocol):
         ``Transformer`` root module to avoid reinitializing tensors.
         """
         buffer_device = buffer_device or self.freqs_cis.device
+        model_init_args = self.model_args.model_init_args
         with torch.device(buffer_device):
             self.freqs_cis = self._precompute_freqs_cis()
-        first_in_init_fn = build_init_fn(self.model_args.first_in_init_fn_type)
+        first_in_init_fn = build_init_fn(model_init_args.first_in_init_fn_type)
         first_in_std = (
-            self.model_args.first_in_init_std
-            * self.model_args.vocab_size**self.model_args.first_in_exp
+            model_init_args.first_in_init_std
+            * self.model_args.vocab_size**model_init_args.first_in_exp
         )
         if self.tok_embeddings is not None:
-            if self.model_args.first_in_init_fn_type == "scion_normal":
+            if model_init_args.first_in_init_fn_type == "scion_normal":
                 # catch cases when axis=1 is sharded
                 assert self.tok_embeddings.weight.size(1) == self.model_args.dim, (
                     f"Input embedding last dim does not match model dim. "
@@ -313,18 +334,18 @@ class Transformer(nn.Module, ModelProtocol):
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_init_fn = build_init_fn(self.model_args.final_out_init_fn_type)
+        final_out_init_fn = build_init_fn(model_init_args.final_out_init_fn_type)
         final_out_std = (
-            self.model_args.final_out_init_std
-            * self.model_args.dim**self.model_args.final_out_exp
+            model_init_args.final_out_init_std
+            * self.model_args.dim**model_init_args.final_out_exp
         )
         cutoff_factor = 3
         if self.output is not None:
             extra_kwargs = {}
-            if self.model_args.final_out_init_fn_type == "trunc_normal":
+            if model_init_args.final_out_init_fn_type == "trunc_normal":
                 extra_kwargs["a"] = -cutoff_factor * final_out_std
                 extra_kwargs["b"] = cutoff_factor * final_out_std
-            if self.model_args.final_out_init_fn_type == "scion_normal":
+            if model_init_args.final_out_init_fn_type == "scion_normal":
                 # catch cases when axis=1 is sharded
                 assert self.output.weight.size(1) == self.model_args.dim, (
                     f"Output last dim does not match model dim. "
@@ -349,17 +370,44 @@ class Transformer(nn.Module, ModelProtocol):
             # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
+            self.model_args.rope_scaling_args,
+        )
+
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        mask_mods = [get_causal_mask_mod()]
+        match self.model_args.attn_mask_type:
+            case "causal":
+                B = 1
+            case "block_causal":
+                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case _:
+                raise ValueError(
+                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                )
+        return create_attention_mask(
+            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
     def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        dtype = get_param_dtype(self)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_kv_cache(max_batch_size, max_seq_length)
+                layer.init_kv_cache(max_batch_size, max_seq_length, dtype=dtype)
+        if self.model_args.num_mtp_modules > 0:
+            for layer in self.mtp_layers.values():
+                if layer is not None:
+                    layer.init_kv_cache(max_batch_size, max_seq_length, dtype=dtype)
 
     def forward(
         self,
         inputs: MoEInputs,
-        input_batch: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
     ) -> MoEInputsDict:
         """
         Perform a forward pass through the Transformer model.
@@ -389,21 +437,39 @@ class Transformer(nn.Module, ModelProtocol):
         if not isinstance(inputs, dict):
             inputs = {"tokens_list": inputs}
         tokens = inputs["tokens_list"]
+        start_pos = inputs.get("start_pos", -1)
+        prev_embed = inputs.get("prev_embed", None)
         total_moe_aux_loss = inputs.get("aux_loss", 0.0)
         if isinstance(tokens, list):
             tokens = tokens[0]
 
+        if not self.model_args.use_flex_attn and start_pos >= 0:
+            raise ValueError(
+                "`start_pos >= 0`, but cannot use caching without FlexAttention"
+            )
+
+        seqlen = tokens.shape[1]
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = (
+            self.tok_embeddings(tokens[:, : self.model_args.max_seq_len])
+            if self.tok_embeddings
+            else tokens
+        )
+
+        if start_pos >= 0:
+            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        else:
+            freqs_cis = self.freqs_cis
 
         for layer in self.layers.values():
-            h, moe_aux_loss = layer(h, self.freqs_cis)
+            h, moe_aux_loss = layer(h, freqs_cis, attention_masks, start_pos=start_pos)
             total_moe_aux_loss += moe_aux_loss
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         # PP compatibility hack
-        if self.model_args.moe_aux_loss_alpha > 0:
+        if self.model_args.moe_args.load_balance_loss_weight > 0:
             return {
                 "tokens_list": [output],
                 "aux_loss": total_moe_aux_loss,

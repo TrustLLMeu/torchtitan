@@ -5,14 +5,54 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torch import nn
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
+from torchtitan.models.inits import parse_depth_init
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+
+from .moe import MoEArgs
+
+
+@dataclass
+class RoPEScalingArgs:
+    scaling_factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
+
+
+@dataclass
+class ModelInitArgs:
+    # If `True`, then each transformer block init uses its layer ID, and
+    # if `False`, each uses the total number of transformer blocks. If
+    # `None`, do not apply any depth scaling.
+    depth_init: str | None = "total_depth"
+    first_in_init_fn_type: str = "normal"
+    first_in_init_std: float = 1.0
+    # Exponent applied to the first input layer's input dimensionality
+    # to obtain its init std factor.
+    first_in_exp: float = 0.0
+    intermediate_init_fn_type: str = "trunc_normal"
+    intermediate_init_std: float = 0.02
+    # Exponent applied to the model's hidden dimensionality to obtain
+    # intermediate layers' init std factors.
+    intermediate_exp: float = 0.0
+    # Whether to initialize the GLU gate as if it was a residual layer.
+    init_gate_as_residual: bool = True
+    final_out_init_fn_type: str = "trunc_normal"
+    final_out_init_std: float = 1.0
+    # Exponent applied to the final output layer's input dimensionality
+    # to obtain its init std factor.
+    final_out_exp: float = -0.5
+    residual_scale: str = "identity"
+
+    router_init_fn_type: str = "trunc_normal"
 
 
 @dataclass
@@ -28,30 +68,11 @@ class MoEModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5
     rope_theta: float = 10000
 
-    max_seq_len: int = 2048
-    # If `True`, then each transformer block init uses its layer ID, and
-    # if `False`, each uses the total number of transformer blocks. If
-    # `None`, do not apply any depth scaling.
-    depth_init: bool | None = True
-    first_in_init_fn_type: str = "normal"
-    first_in_init_std: float = 1.0
-    # Exponent applied to the first input layer's input dimensionality
-    # to obtain its init std factor.
-    first_in_exp: float = 0.0
-    router_init_fn_type: str = "trunc_normal"
-    intermediate_init_fn_type: str = "trunc_normal"
-    intermediate_init_std: float = 0.02
-    # Exponent applied to the model's hidden dimensionality to obtain
-    # intermediate layers' init std factors.
-    intermediate_exp: float = 0.0
-    # Whether to initialize the GLU gate as if it was a residual layer.
-    init_gate_as_residual: bool = True
-    final_out_init_fn_type: str = "trunc_normal"
-    final_out_init_std: float = 1.0
-    # Exponent applied to the final output layer's input dimensionality
-    # to obtain its init std factor.
-    final_out_exp: float = -0.5
-    residual_scale: str = "identity"
+    rope_scaling_args: RoPEScalingArgs | None = None
+
+    max_seq_len: int = 131072
+
+    model_init_args: ModelInitArgs = field(default_factory=ModelInitArgs)
     activation_type: str = "silu"
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
@@ -63,66 +84,37 @@ class MoEModelArgs(BaseModelArgs):
     eos_id: int = 0
     pad_id: int = -1
 
+    # MoE
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+
     # Number of additional modules to insert for multi-token prediction.
     num_mtp_modules: int = 0
 
-    # ==== MoE specific args ====
-    n_shared_experts: int = 1
-    n_routed_experts: int = 0
-    activate_experts: int = 0
-    moe_router_bias_update_speed: float = 0.001  # dpskv3, 0.001
-    # TODO(JSC): Need ablation about the learning rate of the router bias
-    moe_aux_loss_alpha: float = 0.0  # OLMoE, default 0.01
-    # dpskv3 2.5, moonlight 2.446, set None to auto-compute
-    moe_router_scaling_factor: float | None = None
-    # "sign" or "spectral", optionally with "_zero_mean" suffix
-    moe_router_bias_update_norm_factor: str = "sign"
-
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        for name in [
-            "first_in_init_fn_type",
-            "first_in_init_std",
-            "first_in_exp",
-            "router_init_fn_type",
-            "intermediate_init_fn_type",
-            "intermediate_init_std",
-            "intermediate_exp",
-            "init_gate_as_residual",
-            "final_out_init_fn_type",
-            "final_out_init_std",
-            "final_out_exp",
-            "residual_scale",
-            "activation_type",
-            "norm_type",
-        ]:
-            value = getattr(job_config.model, name)
-            setattr(self, name, value)
+        self.model_init_args = job_config.model.model_init_args
+        self.activation_type = job_config.model.activation_type
+        self.norm_type = job_config.model.norm_type
+        self.qk_norm = self.qk_norm or self.norm_everywhere
 
-        for name in [
-            "moe_router_bias_update_norm_factor",
-            "moe_router_scaling_factor",
-        ]:
-            value = getattr(job_config.model, name)
-            if value is not None:
-                setattr(self, name, value)
+        if job_config.model.moe_router_scaling_factor is not None:
+            self.moe_args.scaling_factor = job_config.model.moe_router_scaling_factor
 
-        for name in ["moe_aux_loss_alpha", "moe_router_bias_update_speed"]:
+        if job_config.model.moe_router_bias_update_norm_factor is not None:
+            self.moe_args.bias_update_norm_factor = (
+                job_config.model.moe_router_bias_update_norm_factor
+            )
+
+        for name in ["load_balance_coeff", "load_balance_loss_weight"]:
             value = getattr(job_config.training, name)
             if value is not None:
-                setattr(self, name, value)
+                setattr(self.moe_args, name, value)
 
         self.num_mtp_modules = job_config.training.num_mtp_tokens
         assert self.num_mtp_modules >= 0
 
-        # Normalize `depth_init`.
-        depth_init = job_config.model.depth_init.lower()
-        if depth_init in ["true", "relative_depth"]:
-            depth_init = "relative_depth"
-        elif depth_init in ["false", "total_depth"]:
-            depth_init = "total_depth"
-        elif depth_init in ["none", "null", "identity"]:
-            depth_init = None
-        self.depth_init = depth_init
+        self.model_init_args.depth_init = parse_depth_init(
+            self.model_init_args.depth_init
+        )
 
         if job_config.model.vocab_size is not None:
             self.vocab_size = job_config.model.vocab_size
@@ -169,62 +161,16 @@ class MoEModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-        if (
-            job_config.parallelism.pipeline_parallel_degree > 1
-            and self.use_flex_attn
-            and self.attn_mask_type == "block_causal"
-        ):
-            raise RuntimeError(
-                "PP + block causal FlexAttention support will be fixed soon."
-            )
-        self.max_seq_len = seq_len
-        self.qk_norm = self.qk_norm or self.norm_everywhere
+        self.moe_args._debug_force_load_balance = (
+            job_config.debug.moe_force_load_balance
+        )
 
-    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        nparams_embedding = 0
-        nparams_moe_router = 0
-        nparams_shared_expert = 0
-        nparams_experts = 0
-        nparams_dense = 0
-
-        for name, p in model.named_parameters():
-            if "tok_embeddings" in name or "output" in name:
-                nparams_embedding += p.numel()
-                nparams_dense += p.numel()
-            elif "feed_forward.shared_expert" in name:
-                nparams_shared_expert += p.numel()
-            elif "feed_forward.router" in name:
-                nparams_moe_router += p.numel()
-            elif "feed_forward.experts" in name:
-                nparams_experts += p.numel()
-            else:
-                nparams_dense += p.numel()
-
-        nparams_sparse = nparams_moe_router + nparams_shared_expert + nparams_experts
-        nparams = nparams_dense + nparams_sparse
-        nparams_sparse_active = nparams_moe_router + nparams_shared_expert
-        if self.activate_experts > 0:
-            nparams_sparse_active += (
-                nparams_experts * self.activate_experts // self.n_routed_experts
-            )
-
-        l, h, q, t = (
-            self.n_layers,
-            self.n_heads,
-            self.dim // self.n_heads,
+    def get_nparams_and_flops(
+        self, model: nn.Module, seq_len: int
+    ) -> tuple[int, int, float]:
+        return get_moe_model_nparams_and_flops(
+            self,
+            model,
+            2 * (self.dim // self.n_heads),
             seq_len,
         )
-        # Reasoning behind the factor of 12 for the self-attention part of the formula:
-        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
-        # 2. the flash attention does 1 more matmul recomputation in the backward
-        #    but recomputation should not be counted in calculating MFU           (+0)
-        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
-        # 4. we follow the convention and do not account for sparsity in causal attention
-        num_flops_per_token = (
-            6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-            + 12 * l * h * q * t
-        )
-
-        active_params = nparams_sparse_active + nparams_embedding
-
-        return active_params, nparams, num_flops_per_token
