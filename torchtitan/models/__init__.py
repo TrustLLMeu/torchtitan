@@ -7,5 +7,4 @@
 _supported_models = frozenset(
     ["deepseek_v3", "flux", "llama3", "llama3_ft", "llama4", "qwen3", "MoEllama"]
 )
-from . import llama3
-from . import MoEllama
+from . import llama3, MoEllama
