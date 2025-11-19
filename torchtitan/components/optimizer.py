@@ -538,11 +538,7 @@ def build_optimizers_with_moe_load_balancing(
             for block in part.layers.values():
                 if not block.moe_enabled:
                     continue
-<<<<<<< HEAD
                 moe = block.moe
-=======
-                moe = getattr(block, "moe", block.moe)
->>>>>>> 4d91dce9 (sync some upstream changes.  and rename .ffn of moe to .moe align up steram,  re-use the apply_FSDP from llama4 for our model)
                 # Assuming num_experts is the same for all, so we can just grab it once
                 num_experts = moe.tokens_per_expert.numel()
                 moe_layers_info.append(
@@ -601,10 +597,10 @@ def build_optimizers_with_moe_load_balancing(
 
         # Vectorized bias update calculation (replaces the loop)
         with torch.no_grad():
-            # Get norm factor and speed from the first MoE layer (assuming they are all the same)
+            # Get norm factor and load_balance_coeff from the first MoE layer (assuming they are all the same)
             first_moe = moe_layers_info[0]["module"]
             norm_factor = first_moe.bias_update_norm_factor
-            bias_update_speed = first_moe.bias_update_speed
+            load_balance_coeff = first_moe.load_balance_coeff
 
             # Reshape for batched, per-layer operations
             delta_2d = delta_flat.view(num_layers, num_experts)
@@ -619,7 +615,7 @@ def build_optimizers_with_moe_load_balancing(
             bias_params = [info["module"].expert_bias for info in moe_layers_info]
             updates_list = list(updates_2d.flatten().split(num_experts))
 
-            torch._foreach_add_(bias_params, updates_list, alpha=bias_update_speed)
+            torch._foreach_add_(bias_params, updates_list, alpha=load_balance_coeff)
 
             # Reset router stats in bulk
             try:

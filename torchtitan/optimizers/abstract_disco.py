@@ -94,7 +94,6 @@ class AbstractDiSCO(torch.optim.Optimizer):
 
     @staticmethod
     @torch.no_grad()
-    @torch.compile(fullgraph=True)
     def normalise_grad(g: torch.Tensor, norm_factor: str, eps: float):
         """
         Normalises a gradient tensor. Handles both 2D [d_out, d_in] and

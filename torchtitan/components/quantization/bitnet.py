@@ -12,7 +12,7 @@
 
 import torch.nn as nn
 
-from torchtitan.config.job_config import BitNet, JobConfig
+from torchtitan.config.job_config import BitNetLinear, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,
@@ -25,7 +25,7 @@ class BitNetConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
-        bitnet_config: BitNet = job_config.bitnet
+        bitnet_config: BitNetLinear = job_config.quantize.linear.bitnet
         try:
             from torchao.prototype.quantized_training import (  # noqa: F401
                 bitnet_training,

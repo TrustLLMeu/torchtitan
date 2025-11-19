@@ -225,7 +225,9 @@ class DiSCO(AbstractDiSCO):
                     )
 
             logger.info(
-                f"group_idx: {group_idx} || lr: {lr} || nesterov: {nesterov} || momentum: {momentum} || wd: {wd} || {param_kwargs}"
+                f"group_idx: {group_idx} have {len(group['params'])}"
+                f"weights || lr: {lr} || nesterov: {nesterov} || "
+                f"momentum: {momentum} || wd: {wd} || {param_kwargs}"
             )
 
             if self.is_light and nesterov:
