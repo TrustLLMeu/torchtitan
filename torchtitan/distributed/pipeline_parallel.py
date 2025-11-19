@@ -113,7 +113,8 @@ def pipeline_llm(
         num_virtual_stages = parallel_dims.pp * stages_per_rank
 
     module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
-    if module_names_per_stage is None:
+
+    if module_names_per_stage is None or module_names_per_stage == []:
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
