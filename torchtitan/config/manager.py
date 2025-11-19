@@ -120,7 +120,7 @@ class ConfigManager:
         for path, val in idx_overrides:
             _deep_set(toml_values, path, val)
 
-        config_cls = self._maybe_add_custom_args(args, toml_values)
+        config_cls = self._maybe_add_custom_config(args, toml_values)
 
         base_config = (
             self._dict_to_dataclass(config_cls, toml_values)

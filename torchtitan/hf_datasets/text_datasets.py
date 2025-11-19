@@ -503,7 +503,7 @@ def _replace_none_with_literal(xs: list[str] | None) -> list[str | None] | None:
     return xs
 
 
-def build_hf_dataloader(
+def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
@@ -594,7 +594,7 @@ def build_hf_dataloader(
         )
 
     if job_config.training.dataset_seed is None:
-        job_config.training.dataset_seed = job_config.training.seed
+        job_config.training.dataset_seed = job_config.debug.seed
 
     if job_config.training.dataset_shuffle_buffer_size:
         hf_ds = WindowShuffledDataset(
@@ -617,7 +617,7 @@ def build_hf_dataloader(
     )
 
 
-def build_hf_validation_dataloader(
+def build_text_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,

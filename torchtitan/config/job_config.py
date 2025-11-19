@@ -133,13 +133,7 @@ class Metrics:
 
 
 @dataclass
-class Model:
-    name: str = "llama3"
-    """Which model to train"""
-
-    flavor: str = "debugmodel"
-    """Which model config to train"""
-
+class ModelInitArgs:
     depth_init: Literal["identity", "relative_depth", "total_depth"] = "identity"
     """
     Method to use for depth-wise residual initialization of Transformer blocks.
@@ -196,16 +190,14 @@ class Model:
     - "complete_p": see CompleteP paper (arXiv:2505.01618)
     """
 
-    activation_type: str = "silu"
-    """Type of activation function to use
-    [silu, squared_relu, elu, relu, selu, gelu, approx_gelu, quick_gelu, sigmoid]
-    """
 
-    norm_type: str = "rmsnorm"
-    """
-    Type of layer normalization to use
-    [layernorm, np_layernorm, rmsnorm, np_rmsnorm, ss_rmsnorm]
-    """
+@dataclass
+class Model:
+    name: str = "llama3"
+    """Which model to train"""
+
+    flavor: str = "debugmodel"
+    """Which model config to train"""
 
     hf_assets_path: str = "./tests/assets/tokenizer"
     """
@@ -217,6 +209,20 @@ class Model:
     tokenizer_path: str | None = None
     """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
+
+    model_init_args: ModelInitArgs = field(default_factory=ModelInitArgs)
+    """Model initialization arguments"""
+
+    activation_type: str = "silu"
+    """Type of activation function to use
+    [silu, squared_relu, elu, relu, selu, gelu, approx_gelu, quick_gelu, sigmoid]
+    """
+
+    norm_type: str = "rmsnorm"
+    """
+    Type of layer normalization to use
+    [layernorm, np_layernorm, rmsnorm, np_rmsnorm, ss_rmsnorm]
+    """
 
     vocab_size: int | None = None
     """
@@ -419,10 +425,10 @@ class Training:
     mtp_loss_weight: float = 0.3
     """Weight of multi-token prediction loss term."""
 
-    moe_aux_loss_alpha: float | None = None
+    load_balance_loss_weight: float | None = None
     """Weight of MoE auxiliary loss term."""
 
-    moe_router_bias_update_speed: float = 0.001
+    load_balance_coeff: float = 0.001
     """Speed of MoE router bias update."""
 
     max_norm: float | int = 1.0
@@ -962,12 +968,20 @@ class MXGroupedMM:
 
 
 @dataclass
+class BitNetLinear:
+    precompute_bitnet_scale_for_fsdp: bool = False
+    """Whether to precompute BitNet scales dynamically for FSDP"""
+
+
+@dataclass
 class QuantizedLinear:
     float8: Float8Linear = field(default_factory=Float8Linear)
     """FP8 training config for nn.Linear layers"""
 
     mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
+
+    bitnet: BitNetLinear = field(default_factory=BitNetLinear)
 
 
 @dataclass
@@ -986,12 +1000,6 @@ class Quantize:
 
     grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
     """Quantized training config for grouped GEMMs"""
-
-
-# @dataclass
-# class BitNet:
-#     precompute_bitnet_scale_for_fsdp: bool = False
-#     """Whether to precompute BitNet scales dynamically for FSDP"""
 
 
 @dataclass

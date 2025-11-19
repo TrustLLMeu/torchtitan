@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import datetime
 import functools
 import importlib
@@ -15,7 +16,6 @@ from typing import Any, Generator, Iterable
 
 import tomli_w
 import torch
-
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.models  # noqa: F401
@@ -37,7 +37,6 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.MoEllama.model.model import Transformer as MoETransformer
 from torchtitan.optimizers import norm_helper
 from torchtitan.protocols.model_converter import build_model_converters
@@ -88,8 +87,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.job_config = job_config
-
         self.save_job_config()
+
         logger.info(f"Starting job: {job_config.job.description}")
 
         if job_config.experimental.custom_import:
@@ -185,7 +184,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters, "
             f"{model_active_param_count:,} active parameters{color.reset}"
         )
@@ -437,6 +436,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             with open(job_config_save_path.replace(".json", ".toml"), "wb") as f:
                 tomli_w.dump(clean_config_dict, f)
+
+    def save_model_args(self, model_args: train_spec_module.BaseModelArgs):
+        if torch.distributed.get_rank() == 0:
+            # Save model args to dump folder.
+            os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
+            model_args_save_path = os.path.join(
+                self.job_config.job.dump_folder,
+                "model_args_"
+                + datetime.datetime.now().strftime("%Y%m%d-%H%M")
+                + ".json",
+            )
+
+            model_args_dict = dataclasses.asdict(model_args)
+            model_args_dict.pop("_enforced")
+            with open(model_args_save_path, "w") as f:
+                json.dump(model_args_dict, f, indent=4)
 
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config

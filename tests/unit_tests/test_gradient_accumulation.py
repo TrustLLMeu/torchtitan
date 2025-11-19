@@ -64,9 +64,9 @@ def job_config(
         "--experimental.context_parallel_degree",
         str(context_parallel_degree),
         # Determinism
-        "--training.seed",
+        "--debug.seed",
         str(0),
-        "--training.deterministic",
+        "--debug.deterministic",
         # Activation checkpoint
         "--activation_checkpoint.mode",
         activation_checkpoint_mode,
@@ -151,8 +151,8 @@ class TestGradientAccumulation:
         dist_utils.set_determinism(
             world_mesh,
             device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug.seed,
+            job_config.debug.deterministic,
         )
 
         self.job_config = job_config
