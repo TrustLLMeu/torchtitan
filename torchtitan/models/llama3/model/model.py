@@ -7,6 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
+from functools import partial
 
 import torch
 from torch import nn
@@ -22,10 +23,10 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.models.inits import build_init_fn
 from torchtitan.models.inputs import MTPInputs, MTPInputsDict
 from torchtitan.models.norms import build_norm
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import RoPEScalingArgs, TransformerModelArgs
@@ -63,25 +64,26 @@ def precompute_freqs_cis(
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
     # apply rope scaling
-    scaling_factor = scaling_args.scaling_factor
-    low_freq_factor = scaling_args.low_freq_factor
-    high_freq_factor = scaling_args.high_freq_factor
-    original_max_position_embeddings = scaling_args.original_max_position_embeddings
-    wavelen = 2 * math.pi / freqs
-    high_freq_wavelen = original_max_position_embeddings / high_freq_factor
-    low_freq_wavelen = original_max_position_embeddings / low_freq_factor
-    # wavelen < high_freq_wavelen: do nothing
-    # wavelen > low_freq_wavelen: divide by scaling factor
-    freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
-    # wavelen in between: linear interpolation of the scaled freqs and the original freqs
-    smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
-        high_freq_factor - low_freq_factor
-    )
-    smoothed_freqs = (
-        1 - smooth_factor
-    ) * freqs / scaling_factor + smooth_factor * freqs
-    is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
-    freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
+    if scaling_args is not None:
+        scaling_factor = scaling_args.scaling_factor
+        low_freq_factor = scaling_args.low_freq_factor
+        high_freq_factor = scaling_args.high_freq_factor
+        original_max_position_embeddings = scaling_args.original_max_position_embeddings
+        wavelen = 2 * math.pi / freqs
+        high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+        low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+        # wavelen < high_freq_wavelen: do nothing
+        # wavelen > low_freq_wavelen: divide by scaling factor
+        freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
+        # wavelen in between: linear interpolation of the scaled freqs and the original freqs
+        smooth_factor = (
+            original_max_position_embeddings / wavelen - low_freq_factor
+        ) / (high_freq_factor - low_freq_factor)
+        smoothed_freqs = (
+            1 - smooth_factor
+        ) * freqs / scaling_factor + smooth_factor * freqs
+        is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+        freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
 
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
@@ -242,30 +244,18 @@ class Attention(nn.Module):
         self.q_norm = nn.Identity()
         self.k_norm = nn.Identity()
         self.v_norm = nn.Identity()
-        self.o_norm = nn.Identity()
+        self.mid_norm = nn.Identity()
+
+        build_attention_norm = partial(
+            build_norm, norm_type=model_args.norm_type, eps=model_args.norm_eps
+        )
 
         if self.qk_norm:
-            self.q_norm = build_norm(
-                model_args.norm_type,
-                dim=self.head_dim,
-                eps=model_args.norm_eps,
-            )
-            self.k_norm = build_norm(
-                model_args.norm_type,
-                dim=self.head_dim,
-                eps=model_args.norm_eps,
-            )
+            self.q_norm = build_attention_norm(dim=self.head_dim)
+            self.k_norm = build_attention_norm(dim=self.head_dim)
         if self.norm_everywhere:
-            self.v_norm = build_norm(
-                model_args.norm_type,
-                dim=self.head_dim,
-                eps=model_args.norm_eps,
-            )
-            self.o_norm = build_norm(
-                model_args.norm_type,
-                dim=model_args.dim,
-                eps=model_args.norm_eps,
-            )
+            self.v_norm = build_attention_norm(dim=self.head_dim)
+            self.mid_norm = build_attention_norm(dim=model_args.dim)
 
     def init_weights(self, init_std: float, residual_div: float, init_fn_type: str):
         init_fn = build_init_fn(init_fn_type)
@@ -273,7 +263,7 @@ class Attention(nn.Module):
             init_fn(linear.weight, mean=0.0, std=init_std)
         init_fn(self.wo.weight, mean=0.0, std=init_std / residual_div)
 
-        for norm in (self.q_norm, self.k_norm, self.v_norm, self.o_norm):
+        for norm in (self.q_norm, self.k_norm, self.v_norm, self.mid_norm):
             if not isinstance(norm, nn.Identity):
                 norm.reset_parameters()
 
@@ -353,7 +343,7 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
-        output = self.o_norm(output)
+        output = self.mid_norm(output)
         return self.wo(output)
 
 
@@ -386,10 +376,7 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: float | None,
-        activation_type: str = "silu",
-        norm_everywhere: bool = False,
-        norm_type: str | None = None,
-        norm_eps: float | None = None,
+        model_args: TransformerModelArgs,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -402,25 +389,19 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-        self.act_fn = build_activation(activation_type)
+        self.act_fn = build_activation(model_args.activation_type)
 
-        if norm_everywhere:
-            assert (
-                norm_type is not None
-            ), "`norm_type` needs to be passed when `norm_everywhere=True`"
-            assert (
-                norm_eps is not None
-            ), "`norm_eps` needs to be passed when `norm_everywhere=True`"
-            self.out_norm = build_norm(
-                norm_type,
+        if model_args.norm_everywhere:
+            self.mid_norm = build_norm(
+                model_args.norm_type,
                 dim=hidden_dim,
-                eps=norm_eps,
+                eps=model_args.norm_eps,
             )
         else:
-            self.out_norm = nn.Identity()
+            self.mid_norm = nn.Identity()
 
     def forward(self, x):
-        return self.w2(self.out_norm(self.act_fn(self.w1(x)) * self.w3(x)))
+        return self.w2(self.mid_norm(self.act_fn(self.w1(x)) * self.w3(x)))
 
     def init_weights(
         self,
@@ -435,8 +416,8 @@ class FeedForward(nn.Module):
         gate_init_std = init_std / residual_div if init_gate_as_residual else init_std
         init_fn(self.w3.weight, mean=0.0, std=gate_init_std)
 
-        if not isinstance(self.out_norm, nn.Identity):
-            self.out_norm.reset_parameters()
+        if not isinstance(self.mid_norm, nn.Identity):
+            self.mid_norm.reset_parameters()
 
 
 class TransformerBlock(nn.Module):
@@ -459,23 +440,17 @@ class TransformerBlock(nn.Module):
 
     """
 
-    attention_cls = Attention
-    feed_forward_cls = FeedForward
-
     def __init__(self, layer_id: int, model_args: TransformerModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
-        self.attention = self.attention_cls(model_args)
-        self.feed_forward = self.feed_forward_cls(
+        self.attention = Attention(model_args)
+        self.feed_forward = FeedForward(
             dim=model_args.dim,
             hidden_dim=4 * model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-            activation_type=model_args.activation_type,
-            norm_type=model_args.norm_type,
-            norm_everywhere=model_args.norm_everywhere,
-            norm_eps=model_args.norm_eps,
+            model_args=model_args,
         )
         self.attention_norm = build_norm(
             model_args.norm_type,
@@ -488,36 +463,42 @@ class TransformerBlock(nn.Module):
             eps=model_args.norm_eps,
         )
 
-        self.weight_init_fn_type = model_args.intermediate_init_fn_type
+        model_init_args = model_args.model_init_args
+        self.weight_init_fn_type = model_init_args.intermediate_init_fn_type
         self.weight_init_std = (
-            model_args.intermediate_init_std
-            * model_args.dim**model_args.intermediate_exp
+            model_init_args.intermediate_init_std
+            * model_args.dim**model_init_args.intermediate_exp
         )
-        if model_args.depth_init is None:
-            self.residual_div_attn = 1.0
-            self.residual_div_ffn = 1.0
-        elif model_args.depth_init == "relative_depth":
-            self.residual_div_attn = (2 * (layer_id + 1)) ** 0.5
-            self.residual_div_ffn = (2 * (layer_id + 2)) ** 0.5
-        elif model_args.depth_init == "total_depth":
-            self.residual_div_attn = (2 * model_args.n_layers) ** 0.5
-            self.residual_div_ffn = (2 * model_args.n_layers) ** 0.5
-        else:
-            raise ValueError(f"Invalid depth_init: {model_args.depth_init}")
-        self.init_gate_as_residual = model_args.init_gate_as_residual
+        match model_init_args.depth_init:
+            case "relative_depth":
+                self.residual_div_attn = (2 * (layer_id + 1)) ** 0.5
+                self.residual_div_ffn = (2 * (layer_id + 2)) ** 0.5
+            case "total_depth":
+                self.residual_div_attn = (2 * model_args.n_layers) ** 0.5
+                self.residual_div_ffn = (2 * model_args.n_layers) ** 0.5
+            case None:
+                self.residual_div_attn = 1.0
+                self.residual_div_ffn = 1.0
+            case _:
+                raise ValueError(f"Invalid depth_init: {model_init_args.depth_init}")
+        self.init_gate_as_residual = model_init_args.init_gate_as_residual
 
-        # x = identity_scale * x + block_scale * block(x)
-        if model_args.residual_scale == "depth_scale":
-            total_depth = 2 * model_args.n_layers
-            self.block_scale = 1 / total_depth
-            self.identity_scale = (total_depth - 1) / total_depth
-        elif model_args.residual_scale == "complete_p":
-            total_depth = 2 * model_args.n_layers
-            self.block_scale = 1 / total_depth
-            self.identity_scale = 1.0
-        elif model_args.residual_scale == "identity":
-            self.block_scale = 1.0
-            self.identity_scale = 1.0
+        match model_init_args.residual_scale:
+            case "depth_scale":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = (total_depth - 1) / total_depth
+            case "complete_p":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = 1.0
+            case "identity":
+                self.block_scale = 1.0
+                self.identity_scale = 1.0
+            case _:
+                raise ValueError(
+                    f"Invalid residual_scale: {model_init_args.residual_scale}"
+                )
 
     def forward(
         self,
@@ -705,15 +686,16 @@ class Transformer(nn.Module, ModelProtocol):
         ``Transformer`` root module to avoid reinitializing tensors.
         """
         buffer_device = buffer_device or self.freqs_cis.device
+        model_init_args = self.model_args.model_init_args
         with torch.device(buffer_device):
             self.freqs_cis = self._precompute_freqs_cis()
-        first_in_init_fn = build_init_fn(self.model_args.first_in_init_fn_type)
+        first_in_init_fn = build_init_fn(model_init_args.first_in_init_fn_type)
         first_in_std = (
-            self.model_args.first_in_init_std
-            * self.model_args.vocab_size**self.model_args.first_in_exp
+            model_init_args.first_in_init_std
+            * self.model_args.vocab_size**model_init_args.first_in_exp
         )
         if self.tok_embeddings is not None:
-            if self.model_args.first_in_init_fn_type == "scion_normal":
+            if model_init_args.first_in_init_fn_type == "scion_normal":
                 # catch cases when axis=1 is sharded
                 assert self.tok_embeddings.weight.size(1) == self.model_args.dim, (
                     f"Input embedding last dim does not match model dim. "
@@ -729,18 +711,18 @@ class Transformer(nn.Module, ModelProtocol):
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_init_fn = build_init_fn(self.model_args.final_out_init_fn_type)
+        final_out_init_fn = build_init_fn(model_init_args.final_out_init_fn_type)
         final_out_std = (
-            self.model_args.final_out_init_std
-            * self.model_args.dim**self.model_args.final_out_exp
+            model_init_args.final_out_init_std
+            * self.model_args.dim**model_init_args.final_out_exp
         )
         cutoff_factor = 3
         if self.output is not None:
             extra_kwargs = {}
-            if self.model_args.final_out_init_fn_type == "trunc_normal":
+            if model_init_args.final_out_init_fn_type == "trunc_normal":
                 extra_kwargs["a"] = -cutoff_factor * final_out_std
                 extra_kwargs["b"] = cutoff_factor * final_out_std
-            if self.model_args.final_out_init_fn_type == "scion_normal":
+            if model_init_args.final_out_init_fn_type == "scion_normal":
                 # catch cases when axis=1 is sharded
                 assert self.output.weight.size(1) == self.model_args.dim, (
                     f"Output last dim does not match model dim. "
@@ -841,9 +823,6 @@ class Transformer(nn.Module, ModelProtocol):
         else:
             tokens = tokens_list[0]
 
-        if input_batch is None:
-            input_batch = tokens
-
         if not self.model_args.use_flex_attn and start_pos >= 0:
             raise ValueError(
                 "`start_pos >= 0`, but cannot use caching without FlexAttention"
@@ -864,7 +843,10 @@ class Transformer(nn.Module, ModelProtocol):
             freqs_cis = self.freqs_cis
         for layer in self.layers.values():
             h = layer(
-                h, freqs_cis, start_pos=start_pos, attention_masks=attention_masks
+                h,
+                freqs_cis,
+                attention_masks=attention_masks,
+                start_pos=start_pos,
             )
 
         h = self.norm(h) if self.norm else h
@@ -884,7 +866,7 @@ class Transformer(nn.Module, ModelProtocol):
                 mtp_layer_id = int(mtp_layer_id)
                 token_offset = mtp_layer_id + 1
                 output, prev_embed = mtp_layer(
-                    input_batch[
+                    tokens[
                         :, token_offset : token_offset + self.model_args.max_seq_len
                     ],
                     prev_embed,

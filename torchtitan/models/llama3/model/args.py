@@ -14,6 +14,7 @@ from torch import nn
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
+from torchtitan.models.inits import parse_depth_init
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
@@ -28,23 +29,11 @@ class RoPEScalingArgs:
 
 
 @dataclass
-class TransformerModelArgs(BaseModelArgs):
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: int | None = None
-    vocab_size: int = 128256  # If -1, then take vocab size from tokenizer.
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: float | None = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
-    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
-
-    max_seq_len: int = 131072
+class ModelInitArgs:
     # If `True`, then each transformer block init uses its layer ID, and
     # if `False`, each uses the total number of transformer blocks. If
     # `None`, do not apply any depth scaling.
-    depth_init: bool | None = True
+    depth_init: str | None = "total_depth"
     first_in_init_fn_type: str = "normal"
     first_in_init_std: float = 1.0
     # Exponent applied to the first input layer's input dimensionality
@@ -63,6 +52,24 @@ class TransformerModelArgs(BaseModelArgs):
     # to obtain its init std factor.
     final_out_exp: float = -0.5
     residual_scale: str = "identity"
+
+
+@dataclass
+class TransformerModelArgs(BaseModelArgs):
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: int | None = None
+    vocab_size: int = 128256  # If -1, then take vocab size from tokenizer.
+    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    ffn_dim_multiplier: float | None = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
+    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
+
+    max_seq_len: int = 131072
+
+    model_init_args: ModelInitArgs = field(default_factory=ModelInitArgs)
     activation_type: str = "silu"
     norm_type: str = "rmsnorm"
     qk_norm: bool = False
@@ -78,36 +85,24 @@ class TransformerModelArgs(BaseModelArgs):
     num_mtp_modules: int = 0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        for name in [
-            "first_in_init_fn_type",
-            "first_in_init_std",
-            "first_in_exp",
-            "intermediate_init_fn_type",
-            "intermediate_init_std",
-            "intermediate_exp",
-            "init_gate_as_residual",
-            "final_out_init_fn_type",
-            "final_out_init_std",
-            "final_out_exp",
-            "residual_scale",
-            "activation_type",
-            "norm_type",
-        ]:
-            value = getattr(job_config.model, name)
-            setattr(self, name, value)
+        self.model_init_args = job_config.model.model_init_args
+        self.activation_type = job_config.model.activation_type
+        self.norm_type = job_config.model.norm_type
+        self.qk_norm = self.qk_norm or self.norm_everywhere
+
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
 
         self.num_mtp_modules = job_config.training.num_mtp_tokens
         assert self.num_mtp_modules >= 0
 
-        # Normalize `depth_init`.
-        depth_init = job_config.model.depth_init.lower()
-        if depth_init in ["true", "relative_depth"]:
-            depth_init = "relative_depth"
-        elif depth_init in ["false", "total_depth"]:
-            depth_init = "total_depth"
-        elif depth_init in ["none", "null", "identity"]:
-            depth_init = None
-        self.depth_init = depth_init
+        self.model_init_args.depth_init = parse_depth_init(
+            self.model_init_args.depth_init
+        )
 
         if job_config.model.vocab_size is not None:
             self.vocab_size = job_config.model.vocab_size
@@ -142,14 +137,6 @@ class TransformerModelArgs(BaseModelArgs):
                 f"Padded vocab size from {orig_vocab_size} to {self.vocab_size}."
             )
 
-        seq_len = job_config.training.seq_len
-        if seq_len > self.max_seq_len:
-            logger.warning(
-                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
-            )
-        self.max_seq_len = seq_len
-        self.qk_norm = self.qk_norm or self.norm_everywhere
-
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
@@ -157,7 +144,7 @@ class TransformerModelArgs(BaseModelArgs):
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    ) -> tuple[int, int, float]:
         return get_dense_model_nparams_and_flops(
             self,
             model,

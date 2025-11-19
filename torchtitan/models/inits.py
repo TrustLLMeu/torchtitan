@@ -227,3 +227,15 @@ def build_init_fn(init_fn_type: str):
         return init_fn
     else:
         raise NotImplementedError(f"Unknown `init_fn_type`: '{init_fn_type}'")
+
+
+def parse_depth_init(depth_init):
+    if depth_init in ["true", "relative_depth"]:
+        depth_init = "relative_depth"
+    elif depth_init in ["false", "total_depth"]:
+        depth_init = "total_depth"
+    elif depth_init in ["none", "null", "identity"]:
+        depth_init = None
+    else:
+        raise ValueError(f"Unknown depth_init: {depth_init}")
+    return depth_init

@@ -27,7 +27,6 @@ from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.model.bitnet_model import BitNetTransformerBlock
 from torchtitan.tools.logging import logger
 
 
@@ -239,19 +238,19 @@ def apply_tp(
         SequenceParallel(sequence_dim=-1) is a hack to make it work with Async TP and compile together.
         This is an "approximate" solution, and might lead to error at some point.
         """
-        if not isinstance(transformer_block.attention.o_norm, nn.Identity):
+        if not isinstance(transformer_block.attention.mid_norm, nn.Identity):
             if enable_approx_mid_norm_for_tensor_parallel:
-                layer_plan["attention.o_norm"] = SequenceParallel(sequence_dim=-1)
+                layer_plan["attention.mid_norm"] = SequenceParallel(sequence_dim=-1)
             else:
-                layer_plan["attention.o_norm"] = PrepareMidNormInputOutput()
+                layer_plan["attention.mid_norm"] = PrepareMidNormInputOutput()
 
         if not tensor_parallel_only_attention and not isinstance(
-            transformer_block.feed_forward.out_norm, nn.Identity
+            transformer_block.feed_forward.mid_norm, nn.Identity
         ):
             if enable_approx_mid_norm_for_tensor_parallel:
-                layer_plan["feed_forward.out_norm"] = SequenceParallel(sequence_dim=-1)
+                layer_plan["feed_forward.mid_norm"] = SequenceParallel(sequence_dim=-1)
             else:
-                layer_plan["feed_forward.out_norm"] = PrepareMidNormInputOutput()
+                layer_plan["feed_forward.mid_norm"] = PrepareMidNormInputOutput()
 
         parallelize_module(
             module=transformer_block,
