@@ -59,10 +59,6 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         self.attention = Attention(model_args)
-        # if self.attention_cls is Attention:
-        #     self.attention.forward = torch.compile(
-        #         self.attention.forward, fullgraph=True
-        #     )
 
         moe_args = model_args.moe_args
         # TODO(JSC): Need ablation, feels like this does not really matter
@@ -98,6 +94,9 @@ class TransformerBlock(nn.Module):
             hidden_dim = int(hidden_dim * ratio)
             hidden_dim = hidden_dim - hidden_dim % model_args.multiple_of
 
+            if model_args.moe_intermediate_size is not None:
+                hidden_dim = model_args.moe_intermediate_size
+
             self.moe = MoE(
                 layer_id,
                 model_args.dim,
@@ -113,6 +112,9 @@ class TransformerBlock(nn.Module):
             if model_args.ffn_dim_multiplier is not None:
                 hidden_dim = model_args.ffn_dim_multiplier * hidden_dim
             hidden_dim = int(hidden_dim - hidden_dim % model_args.multiple_of)
+
+            if model_args.intermediate_size is not None:
+                hidden_dim = model_args.intermediate_size
 
             self.feed_forward = FeedForward(
                 dim=model_args.dim,

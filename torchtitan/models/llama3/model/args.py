@@ -57,6 +57,8 @@ class ModelInitArgs:
 @dataclass
 class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
+    intermediate_size: int | None = None
+    head_dim: int | None = None
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: int | None = None
@@ -145,6 +147,7 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, int, float]:
+
         return get_dense_model_nparams_and_flops(
             self,
             model,

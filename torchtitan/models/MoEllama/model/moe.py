@@ -70,7 +70,6 @@ class FeedForward(nn.Module):
         else:
             self.out_norm = nn.Identity()
 
-    # @torch.compile(fullgraph=True)
     def forward(self, x):
         return self.w2(self.out_norm(self.act_fn(self.w1(x)) * self.w3(x)))
 
@@ -138,7 +137,6 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = scores.gather(dim=1, index=selected_experts_indices)  # [N,K]
         return selected_experts_indices, top_scores
 
-    # @torch.compile(fullgraph=True)
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -221,6 +221,11 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
+        if model_args.head_dim is not None:
+            # If we want to explicitly set the head dimension,
+            # we use it instead of the default calculation.
+            self.head_dim = model_args.head_dim
+
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
         )
@@ -384,6 +389,11 @@ class FeedForward(nn.Module):
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+        if model_args.intermediate_size is not None:
+            # If we want to explicitly set the intermediate dimension,
+            # we use it instead of the default calculation.
+            hidden_dim = model_args.intermediate_size
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -571,7 +581,7 @@ class MTPModule(nn.Module):
     def init_weights(self):
         self.in_norm.reset_parameters()
         init_fn = build_init_fn(self.model_args.intermediate_init_fn_type)
-        # Re-use block's init std.
+        # Reuse block's init std.
         init_fn(self.mtp_proj.weight, mean=0.0, std=self.block.weight_init_std)
         self.block.init_weights()
 

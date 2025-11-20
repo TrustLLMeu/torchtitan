@@ -374,8 +374,9 @@ def get_dense_model_nparams_and_flops(
         seq_len: The sequence length in training configs.
 
     Returns:
-        Tuple of (active_params, nparams, num_flops_per_token):
+        Tuple of (active_params, nparams_embedding, nparams, num_flops_per_token):
             active_params: Total number of [activate] model parameters.
+            nparams_embedding: Total number of embedding parameters.
             nparams: Total number of model parameters.
             num_flops_per_token: Estimated number of floating point operations per token.
     """
@@ -385,6 +386,10 @@ def get_dense_model_nparams_and_flops(
         for m in model.children()
         if isinstance(m, nn.Embedding)
     )
+
+    if model_args.head_dim is not None:
+        # maybe to correct the head_dims for the case that head_dim is explicitly set
+        head_dims = 2 * model_args.head_dim
 
     # Reasoning behind the factor of 6 for the self-attention part of the formula:
     # 1. each self-attention has 2 matmul (attention scores and value aggregation,
@@ -404,7 +409,7 @@ def get_dense_model_nparams_and_flops(
         nparams = nparams - nparams_embedding
 
     active_params = nparams
-    return active_params, nparams, num_flops_per_token
+    return active_params, nparams_embedding, nparams, num_flops_per_token
 
 
 def get_moe_model_nparams_and_flops(
@@ -423,8 +428,10 @@ def get_moe_model_nparams_and_flops(
         seq_len: The sequence length in training configs.
 
     Returns:
-        Tuple of (nparams, num_flops_per_token):
-            nparams: Total number of model parameters including all experts.
+        Tuple of (active_params, embedding_params, nparams, num_flops_per_token):
+            active_params: Total number of [activate] model parameters.
+            embedding_params: Total number of embedding parameters.
+            total_params: Total number of model parameters including all experts.
             num_flops_per_token: Estimated number of floating point operations per token
                                 based on active parameters only.
     """
@@ -448,6 +455,7 @@ def get_moe_model_nparams_and_flops(
             nparams_dense += p.numel()
 
     nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
+
     nparams = nparams_dense + nparams_sparse
     nparams_sparse_active = (
         nparams_moe_router
@@ -460,6 +468,9 @@ def get_moe_model_nparams_and_flops(
         f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
     )
 
+    if model_args.head_dim is not None:
+        head_dims = 2 * model_args.head_dim
+
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
@@ -469,6 +480,6 @@ def get_moe_model_nparams_and_flops(
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
         nparams = nparams - nparams_embedding
 
-    active_params = nparams_sparse_active + nparams_embedding
+    active_params = nparams_dense + nparams_sparse_active
 
-    return active_params, nparams, num_flops_per_token
+    return active_params, nparams_embedding, nparams, num_flops_per_token

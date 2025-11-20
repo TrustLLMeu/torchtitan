@@ -58,6 +58,12 @@ class ModelInitArgs:
 @dataclass
 class MoEModelArgs(BaseModelArgs):
     dim: int = 4096
+    intermediate_size: int | None = None
+    # to explicitly set the intermediate dimension, for FFN
+    moe_intermediate_size: int | None = None
+    # to explicitly set the intermediate dimension, for MoE
+    head_dim: int | None = None
+    # to explicitly set the head dimension,
     n_layers: int = 32
     n_dense_layers: int = 0
     n_heads: int = 32
