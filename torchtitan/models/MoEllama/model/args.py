@@ -3,9 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
-
 
 import math
 from dataclasses import dataclass, field
@@ -15,9 +12,11 @@ from torch import nn
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.models.inits import parse_depth_init
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.protocols.model import BaseModelArgs
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+
+from .moe import MoEArgs
 
 
 @dataclass
@@ -53,21 +52,29 @@ class ModelInitArgs:
     final_out_exp: float = -0.5
     residual_scale: str = "identity"
 
+    router_init_fn_type: str = "trunc_normal"
+
 
 @dataclass
-class TransformerModelArgs(BaseModelArgs):
+class MoEModelArgs(BaseModelArgs):
     dim: int = 4096
     intermediate_size: int | None = None
+    # to explicitly set the intermediate dimension, for FFN
+    moe_intermediate_size: int | None = None
+    # to explicitly set the intermediate dimension, for MoE
     head_dim: int | None = None
+    # to explicitly set the head dimension,
     n_layers: int = 32
+    n_dense_layers: int = 0
     n_heads: int = 32
     n_kv_heads: int | None = None
-    vocab_size: int = 128256  # If -1, then take vocab size from tokenizer.
+    vocab_size: int = -1  # If -1, then take vocab size from tokenizer.
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
-    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
+
+    rope_scaling_args: RoPEScalingArgs | None = None
 
     max_seq_len: int = 131072
 
@@ -83,6 +90,9 @@ class TransformerModelArgs(BaseModelArgs):
     eos_id: int = 0
     pad_id: int = -1
 
+    # MoE
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+
     # Number of additional modules to insert for multi-token prediction.
     num_mtp_modules: int = 0
 
@@ -92,12 +102,18 @@ class TransformerModelArgs(BaseModelArgs):
         self.norm_type = job_config.model.norm_type
         self.qk_norm = self.qk_norm or self.norm_everywhere
 
-        seq_len = job_config.training.seq_len
-        if seq_len > self.max_seq_len:
-            logger.warning(
-                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+        if job_config.model.moe_router_scaling_factor is not None:
+            self.moe_args.scaling_factor = job_config.model.moe_router_scaling_factor
+
+        if job_config.model.moe_router_bias_update_norm_factor is not None:
+            self.moe_args.bias_update_norm_factor = (
+                job_config.model.moe_router_bias_update_norm_factor
             )
-        self.max_seq_len = seq_len
+
+        for name in ["load_balance_coeff", "load_balance_loss_weight"]:
+            value = getattr(job_config.training, name)
+            if value is not None:
+                setattr(self.moe_args, name, value)
 
         self.num_mtp_modules = job_config.training.num_mtp_tokens
         assert self.num_mtp_modules >= 0
@@ -139,16 +155,26 @@ class TransformerModelArgs(BaseModelArgs):
                 f"Padded vocab size from {orig_vocab_size} to {self.vocab_size}."
             )
 
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
+
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
             )
 
+        self.moe_args._debug_force_load_balance = (
+            job_config.debug.moe_force_load_balance
+        )
+
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, int, float]:
-
-        return get_dense_model_nparams_and_flops(
+        return get_moe_model_nparams_and_flops(
             self,
             model,
             2 * (self.dim // self.n_heads),
