@@ -271,6 +271,11 @@ class CheckpointManager:
             assert (
                 sd_adapter is not None
             ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+
+        if self.last_save_model_only:
+            logger.warning(
+                f"You have set last_save_model_only to True, and last_save_in_hf to {self.last_save_in_hf}."
+            )
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading

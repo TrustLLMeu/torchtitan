@@ -714,7 +714,7 @@ class Checkpoint:
     this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
     """
 
-    last_save_model_only: bool = True
+    last_save_model_only: bool = False
     """
     When last_save_model_only=True, only the model will be saved at the end of training,
     the last save.  With this, checkpoints can be loaded using `torch.load(..., weights_only=True)`
