@@ -67,7 +67,7 @@ class TransformerModelArgs(BaseModelArgs):
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
-    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
+    rope_scaling_args: RoPEScalingArgs | None = None
 
     max_seq_len: int = 131072
 
