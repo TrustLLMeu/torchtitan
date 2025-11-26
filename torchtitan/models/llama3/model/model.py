@@ -394,7 +394,8 @@ class FeedForward(nn.Module):
             # If we want to explicitly set the intermediate dimension,
             # we use it instead of the default calculation.
             hidden_dim = model_args.intermediate_size
-
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
