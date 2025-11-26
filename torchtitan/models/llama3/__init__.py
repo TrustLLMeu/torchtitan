@@ -12,9 +12,10 @@ from torchtitan.components.validate import build_validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from .hf_assests import setup_hf
 
 from .infra.parallelize import parallelize_llama
-from .model.args import TransformerModelArgs
+from .model.args import RoPEScalingArgs, TransformerModelArgs
 
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3StateDictAdapter
@@ -428,6 +429,7 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
+        hf_assets_setup_fn=setup_hf.copy_and_overwrite_model_config,
     ),
 )
 
@@ -445,5 +447,6 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
+        hf_assets_setup_fn=setup_hf.copy_and_overwrite_model_config,
     ),
 )

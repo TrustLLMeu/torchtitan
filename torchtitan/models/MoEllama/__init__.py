@@ -12,17 +12,20 @@ from torchtitan.components.validate import build_validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from .hf_assests import setup_hf
 
 from .infra.parallelize import parallelize_llama
 from .model.args import MoEModelArgs
 from .model.model import Transformer
 from .model.moe import MoEArgs
+from .model.state_dict_adapter import MoEllamaStateDictAdapter
 
 __all__ = [
     "MoEArgs",
     "MoEModelArgs",
     "Transformer",
     "moe_llama3_configs",
+    "MoEllamaStateDictAdapter",
 ]
 
 
@@ -58,6 +61,7 @@ moe_llama3_configs = {
         norm_type="np_rmsnorm",
         norm_everywhere=True,
         multiple_of=64,
+        n_dense_layers=1,
     ),
     "1B-7B-Proxy": MoEModelArgs(
         dim=512,
@@ -129,6 +133,8 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=MoEllamaStateDictAdapter,
+        hf_assets_setup_fn=setup_hf.copy_and_overwrite_model_config,
     ),
 )
 
@@ -145,5 +151,7 @@ register_train_spec(
         build_tokenizer_fn=build_hf_byte_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=MoEllamaStateDictAdapter,
+        hf_assets_setup_fn=setup_hf.copy_and_overwrite_model_config,
     ),
 )

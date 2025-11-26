@@ -54,6 +54,8 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
         self.act_fn = build_activation(activation_type)
+        self.dim = dim
+        self.hidden_dim = hidden_dim
 
         if norm_everywhere:
             assert (
