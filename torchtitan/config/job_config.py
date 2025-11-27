@@ -408,6 +408,15 @@ class Training:
     dataset_key: list[str] = field(default_factory=lambda: ["text"])
     """Key to use for extracting the relevant text data from the dataset's samples"""
 
+    data_mixing_scheduler_configs: str | None = None
+    """Path to the mixing scheduler configs file
+    The mixing scheduler configs file should be a JSON file with the following format:
+    {
+        "step": [weights_for_dataset_0, weights_for_dataset_1, ...],
+    }
+    and key "0" must exist.
+    """
+
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 

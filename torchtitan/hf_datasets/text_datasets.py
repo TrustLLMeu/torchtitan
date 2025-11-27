@@ -282,6 +282,12 @@ class MixedDataset(IterableDataset, Stateful):
         ]
         return dataset_index
 
+    def set_weights(self, weights: list[float]):
+        assert len(weights) == len(
+            self.datasets
+        ), "weights must have the same length as datasets"
+        self.weights = weights
+
     def _get_next(self, dataset_index: int):
         data_iter = self._data_iters[dataset_index]
         try:
