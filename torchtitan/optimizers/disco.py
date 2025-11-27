@@ -225,7 +225,7 @@ class DiSCO(AbstractDiSCO):
                     )
 
             logger.info(
-                f"group_idx: {group_idx} have {len(group['params'])}"
+                f"group_idx: {group_idx} have {len(group['params'])} "
                 f"weights || lr: {lr} || nesterov: {nesterov} || "
                 f"momentum: {momentum} || wd: {wd} || {param_kwargs}"
             )
@@ -902,13 +902,13 @@ class DiSCO(AbstractDiSCO):
 
                 for norm_idx, norm_name in enumerate(self.norms_to_log):
                     idx = base + norm_idx
-                    final_norms[
-                        f"track_update_{norm_name}/{cleaned_p_name}"
-                    ] = gathered_update_norms[idx]
+                    final_norms[f"track_update_{norm_name}/{cleaned_p_name}"] = (
+                        gathered_update_norms[idx]
+                    )
                     if apply_on_weight and gathered_weight_norms is not None:
-                        final_norms[
-                            f"track_param_{norm_name}/{cleaned_p_name}"
-                        ] = gathered_weight_norms[idx]
+                        final_norms[f"track_param_{norm_name}/{cleaned_p_name}"] = (
+                            gathered_weight_norms[idx]
+                        )
 
         if self.is_dp_rank_0:
             self.norms_at_current_step.update(final_norms)
