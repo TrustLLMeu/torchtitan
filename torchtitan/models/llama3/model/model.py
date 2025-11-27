@@ -260,7 +260,7 @@ class Attention(nn.Module):
             self.k_norm = build_attention_norm(dim=self.head_dim)
         if self.norm_everywhere:
             self.v_norm = build_attention_norm(dim=self.head_dim)
-            self.mid_norm = build_attention_norm(dim=model_args.dim)
+            self.mid_norm = build_attention_norm(dim=model_args.n_heads * self.head_dim)
 
     def init_weights(self, init_std: float, residual_div: float, init_fn_type: str):
         init_fn = build_init_fn(init_fn_type)
@@ -751,8 +751,11 @@ class Transformer(nn.Module, ModelProtocol):
                     layer.init_weights()
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
+        dim_per_head = self.model_args.dim // self.model_args.n_heads
+        if self.model_args.head_dim is not None:
+            dim_per_head = self.model_args.head_dim
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
+            dim_per_head,
             # Need to compute until at least the max token limit for generation
             # TODO: explain in docs/composability.md why we removed the 2x
             # relaxing in our CP enablement PR

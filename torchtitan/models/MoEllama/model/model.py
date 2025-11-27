@@ -359,8 +359,11 @@ class Transformer(nn.Module, ModelProtocol):
                     layer.init_weights()
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
+        dim_per_head = self.model_args.dim // self.model_args.n_heads
+        if self.model_args.head_dim is not None:
+            dim_per_head = self.model_args.head_dim
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
+            dim_per_head,
             # Need to compute until at least the max token limit for generation
             # TODO: explain in docs/composability.md why we removed the 2x
             # relaxing in our CP enablement PR

@@ -81,7 +81,7 @@ moe_llama3_configs = {
         norm_everywhere=True,
         multiple_of=64,
     ),
-    "1B-7B": MoEModelArgs(
+    "debug-run-v1-1B-7B": MoEModelArgs(
         dim=2048,
         n_layers=24,
         n_heads=16,
@@ -98,6 +98,47 @@ moe_llama3_configs = {
         norm_type="np_rmsnorm",
         norm_everywhere=True,
         multiple_of=256,
+    ),
+    "bsc-1B-7B-opt-c": MoEModelArgs(
+        dim=2048,
+        n_layers=24,
+        n_dense_layers=1,
+        n_heads=16,
+        n_kv_heads=4,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=1,
+            top_k=8,
+            scaling_factor=2.8232,  # 8 of 64 experts
+        ),
+        qk_norm=True,
+        norm_eps=1e-20,
+        rope_theta=10000,
+        norm_type="np_rmsnorm",
+        norm_everywhere=True,
+        intermediate_size=5120,
+        moe_intermediate_size=640,
+    ),
+    "bsc-1B-7B-opt-g": MoEModelArgs(
+        dim=2048,
+        n_layers=24,
+        n_dense_layers=1,
+        n_heads=32,
+        n_kv_heads=4,
+        head_dim=128,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=1,
+            top_k=8,
+            scaling_factor=2.8232,  # 8 of 64 experts
+        ),
+        qk_norm=True,
+        norm_eps=1e-20,
+        rope_theta=10000,
+        norm_type="np_rmsnorm",
+        norm_everywhere=True,
+        intermediate_size=5120,
+        moe_intermediate_size=640,
     ),
     "test": MoEModelArgs(
         dim=256,
