@@ -191,7 +191,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {job_config.model.name} - {job_config.model.flavor} |"
+            f"{color.blue}Model {job_config.model.name} - {job_config.model.flavor} - "
+            f"Flops: {self.metrics_processor.num_flops_per_token:,}"
+        )
+        logger.info(
             f"{color.red}total parameters: {model_param_count:,} | "
             f"active: {active_param:,} | embedding: {embedding_param:,} {color.reset}"
         )
