@@ -277,6 +277,10 @@ class DiSCO(AbstractDiSCO):
                     # ignore the non-trainable parameters
                     continue
 
+                # Initialize the momentum buffer if it's the first time.
+                if "momentum_buffer" not in self.state[p]:
+                    self.state[p]["momentum_buffer"] = torch.zeros_like(p)
+
                 # 1) scalar branch identical to step()
                 if p.numel() == 1:
                     assert (
@@ -902,13 +906,13 @@ class DiSCO(AbstractDiSCO):
 
                 for norm_idx, norm_name in enumerate(self.norms_to_log):
                     idx = base + norm_idx
-                    final_norms[f"track_update_{norm_name}/{cleaned_p_name}"] = (
-                        gathered_update_norms[idx]
-                    )
+                    final_norms[
+                        f"track_update_{norm_name}/{cleaned_p_name}"
+                    ] = gathered_update_norms[idx]
                     if apply_on_weight and gathered_weight_norms is not None:
-                        final_norms[f"track_param_{norm_name}/{cleaned_p_name}"] = (
-                            gathered_weight_norms[idx]
-                        )
+                        final_norms[
+                            f"track_param_{norm_name}/{cleaned_p_name}"
+                        ] = gathered_weight_norms[idx]
 
         if self.is_dp_rank_0:
             self.norms_at_current_step.update(final_norms)
@@ -1118,47 +1122,40 @@ class DiSCO(AbstractDiSCO):
             )
 
     @record_function("disco._prepare_gradients_and_momentum")
+    @torch.no_grad()
+    @torch.compile(fullgraph=True)
     def prepare_gradients_and_momentum(self) -> None:
         """
         Fused pre-pass that updates momentum buffers for *all* parameters
         with available grads:
             buf <- (1 - m) * buf + m * g
         It performs foreach-kernel updates per (device, dtype, momentum),
-        """
-        buckets = defaultdict(lambda: {"bufs": [], "grads": [], "m": 0.0})
 
+        ************************************************************************
+        To make it faster, we removed some sainty checks
+        - all grad should exists in the buffer (Dont change the p.grad after init)
+        - all params and grads should have the same dtpye, i.e. bf16 or fp32
+        ************************************************************************
+        """
         for group in self.param_groups:
             m = float(group["momentum"])
+            decay = 1.0 - m
             use_momentum = (not self.is_light) and (0.0 < m < 1.0)
 
             if not use_momentum:
                 continue
 
+            bufs, grads = [], []
             for p in group["params"]:
                 g = getattr(p, "grad", None)
                 if g is None or not p.requires_grad:
                     continue
+                buf = self.state[p]["momentum_buffer"]
+                bufs.append(buf)
+                grads.append(g)
 
-                # Initialize the momentum buffer if it's the first time.
-                state = self.state.setdefault(p, {})
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-
-                # Add the buffer and gradient to the appropriate bucket.
-                key = (g.dtype, m)
-                bucket = buckets[key]
-                bucket["bufs"].append(buf)
-                bucket["grads"].append(g)
-                bucket["m"] = m
-
-        # Launch the fused kernels for each bucket.
-        for (_, m), bucket_data in buckets.items():
-            if not bucket_data["bufs"]:
-                continue
-            # Perform the momentum update: buf = buf * (1 - m) + g * m
-            torch._foreach_mul_(bucket_data["bufs"], 1.0 - m)
-            torch._foreach_add_(bucket_data["bufs"], bucket_data["grads"], alpha=m)
+            torch._foreach_mul_(bufs, decay)
+            torch._foreach_add_(bufs, grads, alpha=m)
 
     @record_function("disco.get_momentum_or_grad")
     def get_momentum_or_grad(self, p, momentum, nesterov, gather_to_local=False):
