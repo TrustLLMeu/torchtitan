@@ -99,9 +99,7 @@ def module_split(
             fragment_idx,
             module_names,
         )
-        logger.info(
-            f"building fragment_idx {fragment_idx} " f"with modules {module_names}"
-        )
+        logger.info(f"building fragment_idx {fragment_idx} with modules {module_names}")
         model_fragments.append(model_fragment)
 
     return model_fragments

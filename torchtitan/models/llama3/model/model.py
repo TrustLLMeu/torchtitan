@@ -7,13 +7,15 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
+from functools import partial
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.distributed.utils import get_param_dtype
+from torchtitan.models.activations import build_activation
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
@@ -21,6 +23,9 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
+from torchtitan.models.inits import build_init_fn
+from torchtitan.models.inputs import MTPInputs, MTPInputsDict
+from torchtitan.models.norms import build_norm
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -59,25 +64,26 @@ def precompute_freqs_cis(
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
     # apply rope scaling
-    scaling_factor = scaling_args.scaling_factor
-    low_freq_factor = scaling_args.low_freq_factor
-    high_freq_factor = scaling_args.high_freq_factor
-    original_max_position_embeddings = scaling_args.original_max_position_embeddings
-    wavelen = 2 * math.pi / freqs
-    high_freq_wavelen = original_max_position_embeddings / high_freq_factor
-    low_freq_wavelen = original_max_position_embeddings / low_freq_factor
-    # wavelen < high_freq_wavelen: do nothing
-    # wavelen > low_freq_wavelen: divide by scaling factor
-    freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
-    # wavelen in between: linear interpolation of the scaled freqs and the original freqs
-    smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
-        high_freq_factor - low_freq_factor
-    )
-    smoothed_freqs = (
-        1 - smooth_factor
-    ) * freqs / scaling_factor + smooth_factor * freqs
-    is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
-    freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
+    if scaling_args is not None:
+        scaling_factor = scaling_args.scaling_factor
+        low_freq_factor = scaling_args.low_freq_factor
+        high_freq_factor = scaling_args.high_freq_factor
+        original_max_position_embeddings = scaling_args.original_max_position_embeddings
+        wavelen = 2 * math.pi / freqs
+        high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+        low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+        # wavelen < high_freq_wavelen: do nothing
+        # wavelen > low_freq_wavelen: divide by scaling factor
+        freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
+        # wavelen in between: linear interpolation of the scaled freqs and the original freqs
+        smooth_factor = (
+            original_max_position_embeddings / wavelen - low_freq_factor
+        ) / (high_freq_factor - low_freq_factor)
+        smoothed_freqs = (
+            1 - smooth_factor
+        ) * freqs / scaling_factor + smooth_factor * freqs
+        is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+        freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
 
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
@@ -152,6 +158,39 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+class KVCache(nn.Module):
+    def __init__(
+        self,
+        batch_size: int,
+        seq_length: int,
+        n_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        super().__init__()
+        cache_shape = (batch_size, seq_length, n_kv_heads, head_dim)
+        self.register_buffer(
+            "cache_k",
+            torch.zeros(cache_shape, dtype=dtype, device=device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cache_v",
+            torch.zeros(cache_shape, dtype=dtype, device=device),
+            persistent=False,
+        )
+
+    def update(self, start_pos, xk, xv):
+        assert start_pos >= 0
+        bsz, seqlen, _ = xk.shape
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        xk = self.cache_k[:bsz, : start_pos + seqlen]
+        xv = self.cache_v[:bsz, : start_pos + seqlen]
+        return xk, xv
+
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -182,6 +221,11 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
+        if model_args.head_dim is not None:
+            # If we want to explicitly set the head dimension,
+            # we use it instead of the default calculation.
+            self.head_dim = model_args.head_dim
+
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
         )
@@ -197,16 +241,56 @@ class Attention(nn.Module):
         else:
             self.inner_attention = ScaledDotProductAttentionWrapper()
 
-    def init_weights(self, init_std: float):
+        self._kv_cache: KVCache | None = None
+
+        self.qk_norm = model_args.qk_norm or model_args.norm_everywhere
+        self.norm_everywhere = model_args.norm_everywhere
+
+        self.q_norm = nn.Identity()
+        self.k_norm = nn.Identity()
+        self.v_norm = nn.Identity()
+        self.mid_norm = nn.Identity()
+
+        build_attention_norm = partial(
+            build_norm, norm_type=model_args.norm_type, eps=model_args.norm_eps
+        )
+
+        if self.qk_norm:
+            self.q_norm = build_attention_norm(dim=self.head_dim)
+            self.k_norm = build_attention_norm(dim=self.head_dim)
+        if self.norm_everywhere:
+            self.v_norm = build_attention_norm(dim=self.head_dim)
+            self.mid_norm = build_attention_norm(dim=model_args.n_heads * self.head_dim)
+
+    def init_weights(self, init_std: float, residual_div: float, init_fn_type: str):
+        init_fn = build_init_fn(init_fn_type)
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            init_fn(linear.weight, mean=0.0, std=init_std)
+        init_fn(self.wo.weight, mean=0.0, std=init_std / residual_div)
+
+        for norm in (self.q_norm, self.k_norm, self.v_norm, self.mid_norm):
+            if not isinstance(norm, nn.Identity):
+                norm.reset_parameters()
+
+    def init_kv_cache(
+        self, max_batch_size: int, max_seq_length: int, dtype: torch.dtype
+    ):
+        device = self.wk.weight.device
+        self._kv_cache = KVCache(
+            batch_size=max_batch_size,
+            seq_length=max_seq_length,
+            n_kv_heads=self.n_kv_heads,
+            head_dim=self.head_dim,
+            dtype=dtype,
+            device=device,
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        start_pos: int = -1,
     ):
         """
         Forward pass of the attention module.
@@ -230,7 +314,16 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
+        # Apply optional QK normalization
+
+        xq = self.q_norm(xq)
+        xk = self.k_norm(xk)
+        xv = self.v_norm(xv)
+
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+        if self._kv_cache is not None and start_pos >= 0:
+            xk, xv = self._kv_cache.update(start_pos, xk, xv)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -255,6 +348,7 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
+        output = self.mid_norm(output)
         return self.wo(output)
 
 
@@ -267,6 +361,12 @@ class FeedForward(nn.Module):
         hidden_dim (int): Hidden dimension of the feedforward layer.
         multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
         ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+        norm_everywhere (bool): Whether to normalize the gating output.
+        norm_type (Optional[str]): Normalization function to use. Only
+            relevant and required, if `norm_everywhere=True`.
+        norm_eps (str): Numerical stability epsilon for normalization
+            layers. Only relevant and required, if
+            `norm_everywhere=True`.
 
     Attributes:
         w1 (Linear): Linear transformation for the first layer.
@@ -281,6 +381,7 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: float | None,
+        model_args: TransformerModelArgs,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -289,17 +390,45 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        if model_args.intermediate_size is not None:
+            # If we want to explicitly set the intermediate dimension,
+            # we use it instead of the default calculation.
+            hidden_dim = model_args.intermediate_size
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-    def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        self.act_fn = build_activation(model_args.activation_type)
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+        if model_args.norm_everywhere:
+            self.mid_norm = build_norm(
+                model_args.norm_type,
+                dim=hidden_dim,
+                eps=model_args.norm_eps,
+            )
+        else:
+            self.mid_norm = nn.Identity()
+
+    def forward(self, x):
+        return self.w2(self.mid_norm(self.act_fn(self.w1(x)) * self.w3(x)))
+
+    def init_weights(
+        self,
+        init_std: float,
+        residual_div: float,
+        init_gate_as_residual: bool,
+        init_fn_type: str,
+    ):
+        init_fn = build_init_fn(init_fn_type)
+        init_fn(self.w1.weight, mean=0.0, std=init_std)
+        init_fn(self.w2.weight, mean=0.0, std=init_std / residual_div)
+        gate_init_std = init_std / residual_div if init_gate_as_residual else init_std
+        init_fn(self.w3.weight, mean=0.0, std=gate_init_std)
+
+        if not isinstance(self.mid_norm, nn.Identity):
+            self.mid_norm.reset_parameters()
 
 
 class TransformerBlock(nn.Module):
@@ -332,20 +461,62 @@ class TransformerBlock(nn.Module):
             hidden_dim=4 * model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            model_args=model_args,
         )
-        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention_norm = build_norm(
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+        )
+        self.ffn_norm = build_norm(
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+        )
 
-        if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
+        model_init_args = model_args.model_init_args
+        self.weight_init_fn_type = model_init_args.intermediate_init_fn_type
+        self.weight_init_std = (
+            model_init_args.intermediate_init_std
+            * model_args.dim**model_init_args.intermediate_exp
+        )
+        match model_init_args.depth_init:
+            case "relative_depth":
+                self.residual_div_attn = (2 * (layer_id + 1)) ** 0.5
+                self.residual_div_ffn = (2 * (layer_id + 2)) ** 0.5
+            case "total_depth":
+                self.residual_div_attn = (2 * model_args.n_layers) ** 0.5
+                self.residual_div_ffn = (2 * model_args.n_layers) ** 0.5
+            case None:
+                self.residual_div_attn = 1.0
+                self.residual_div_ffn = 1.0
+            case _:
+                raise ValueError(f"Invalid depth_init: {model_init_args.depth_init}")
+        self.init_gate_as_residual = model_init_args.init_gate_as_residual
+
+        match model_init_args.residual_scale:
+            case "depth_scale":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = (total_depth - 1) / total_depth
+            case "complete_p":
+                total_depth = 2 * model_args.n_layers
+                self.block_scale = 1 / total_depth
+                self.identity_scale = 1.0
+            case "identity":
+                self.block_scale = 1.0
+                self.identity_scale = 1.0
+            case _:
+                raise ValueError(
+                    f"Invalid residual_scale: {model_init_args.residual_scale}"
+                )
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        start_pos: int = -1,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -358,15 +529,97 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        h = self.identity_scale * x + self.block_scale * self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, start_pos=start_pos
+        )
+        out = self.identity_scale * h + self.block_scale * self.feed_forward(
+            self.ffn_norm(h)
+        )
         return out
 
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.attention.init_weights(
+            self.weight_init_std,
+            residual_div=self.residual_div_attn,
+            init_fn_type=self.weight_init_fn_type,
+        )
+        self.feed_forward.init_weights(
+            self.weight_init_std,
+            residual_div=self.residual_div_ffn,
+            init_gate_as_residual=self.init_gate_as_residual,
+            init_fn_type=self.weight_init_fn_type,
+        )
+
+    def init_kv_cache(
+        self, max_batch_size: int, max_seq_length: int, dtype: torch.dtype
+    ):
+        self.attention.init_kv_cache(max_batch_size, max_seq_length, dtype=dtype)
+
+
+class MTPModule(nn.Module):
+    def __init__(
+        self,
+        layer_id: int,
+        model_args: TransformerModelArgs,
+        parent_transformer: nn.Module,
+    ):
+        super().__init__()
+        self.model_args = model_args
+
+        # TODO handle these for pipelining
+        self.tok_embeddings = parent_transformer.tok_embeddings
+        self.norm = parent_transformer.norm
+        self.output = parent_transformer.output
+
+        self.in_norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+        self.mtp_proj = nn.Linear(2 * model_args.dim, model_args.dim)
+        self.block = parent_transformer.transformer_block_cls(layer_id, model_args)
+
+    def init_weights(self):
+        self.in_norm.reset_parameters()
+        init_fn = build_init_fn(self.model_args.intermediate_init_fn_type)
+        # Reuse block's init std.
+        init_fn(self.mtp_proj.weight, mean=0.0, std=self.block.weight_init_std)
+        self.block.init_weights()
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        prev_embed: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        start_pos: int = -1,
+    ):
+        """
+        Perform a forward pass through the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input token indices.
+            prev_embed (torch.Tensor): Output token embeddings of previous
+                Transformer layer (after output norm, before unembedding).
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+
+        Returns:
+            torch.Tensor: Output logits after applying the Transformer model.
+            torch.Tensor: Output token embeddings after applying the Transformer model.
+
+        """
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = self.tok_embeddings(tokens)
+
+        h = self.in_norm(h)
+
+        h = torch.cat([h, prev_embed], dim=-1)
+        h = self.mtp_proj(h)
+        h = self.block(h, freqs_cis, start_pos=start_pos)
+
+        h = self.norm(h)
+        output = self.output(h)
+        prev_embed = h
+        return output, prev_embed
 
 
 class Transformer(nn.Module, ModelProtocol):
@@ -388,13 +641,20 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
+    transformer_block_cls = TransformerBlock
+
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+        self.pad_id = model_args.pad_id
 
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.tok_embeddings = nn.Embedding(
+            model_args.vocab_size,
+            model_args.dim,
+            padding_idx=self.pad_id if self.pad_id >= 0 else None,
+        )
 
         self.register_buffer(
             "freqs_cis", self._precompute_freqs_cis(), persistent=False
@@ -402,9 +662,24 @@ class Transformer(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+            self.layers[str(layer_id)] = self.transformer_block_cls(
+                layer_id, model_args
+            )
+        self.norm = build_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        # Optionally add MTP modules.
+        if model_args.num_mtp_modules > 0:
+            self.mtp_layers = torch.nn.ModuleDict()
+            for mtp_layer_id in range(model_args.num_mtp_modules):
+                layer_id = mtp_layer_id + model_args.n_layers
+                self.mtp_layers[str(mtp_layer_id)] = MTPModule(
+                    layer_id,
+                    model_args,
+                    self,
+                )
 
     def init_weights(
         self,
@@ -422,29 +697,65 @@ class Transformer(nn.Module, ModelProtocol):
         ``Transformer`` root module to avoid reinitializing tensors.
         """
         buffer_device = buffer_device or self.freqs_cis.device
+        model_init_args = self.model_args.model_init_args
         with torch.device(buffer_device):
             self.freqs_cis = self._precompute_freqs_cis()
+        first_in_init_fn = build_init_fn(model_init_args.first_in_init_fn_type)
+        first_in_std = (
+            model_init_args.first_in_init_std
+            * self.model_args.vocab_size**model_init_args.first_in_exp
+        )
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            if model_init_args.first_in_init_fn_type == "scion_normal":
+                # catch cases when axis=1 is sharded
+                assert self.tok_embeddings.weight.size(1) == self.model_args.dim, (
+                    f"Input embedding last dim does not match model dim. "
+                    f"Got shape: {self.tok_embeddings.weight.shape}"
+                )
+            first_in_init_fn(
+                self.tok_embeddings.weight,
+                mean=0.0,
+                std=first_in_std,
+            )
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_init_fn = build_init_fn(model_init_args.final_out_init_fn_type)
+        final_out_std = (
+            model_init_args.final_out_init_std
+            * self.model_args.dim**model_init_args.final_out_exp
+        )
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            extra_kwargs = {}
+            if model_init_args.final_out_init_fn_type == "trunc_normal":
+                extra_kwargs["a"] = -cutoff_factor * final_out_std
+                extra_kwargs["b"] = cutoff_factor * final_out_std
+            if model_init_args.final_out_init_fn_type == "scion_normal":
+                # catch cases when axis=1 is sharded
+                assert self.output.weight.size(1) == self.model_args.dim, (
+                    f"Output last dim does not match model dim. "
+                    f"Got shape: {self.output.weight.shape}"
+                )
+            final_out_init_fn(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
+                **extra_kwargs,
             )
+        if self.model_args.num_mtp_modules > 0:
+            for layer in self.mtp_layers.values():
+                if layer is not None:
+                    layer.init_weights()
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
+        dim_per_head = self.model_args.dim // self.model_args.n_heads
+        if self.model_args.head_dim is not None:
+            dim_per_head = self.model_args.head_dim
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
+            dim_per_head,
             # Need to compute until at least the max token limit for generation
             # TODO: explain in docs/composability.md why we removed the 2x
             # relaxing in our CP enablement PR
@@ -474,30 +785,115 @@ class Transformer(nn.Module, ModelProtocol):
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
+    def init_kv_cache(self, max_batch_size: int, max_seq_length: int):
+        dtype = get_param_dtype(self)
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_kv_cache(max_batch_size, max_seq_length, dtype=dtype)
+        if self.model_args.num_mtp_modules > 0:
+            for layer in self.mtp_layers.values():
+                if layer is not None:
+                    layer.init_kv_cache(max_batch_size, max_seq_length, dtype=dtype)
+
     def forward(
         self,
-        tokens: torch.Tensor,
+        inputs: MTPInputs,
         attention_masks: AttentionMasksType | None = None,
-    ):
+    ) -> MTPInputsDict:
         """
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
-                If pipeline parallelism is enabled, this will be the input token indices
-                for the ranks on the first pipeline stage. This will be the activation of the
-                previous pipeline stage if the current rank is not on the first stage.
+            inputs (MTPInputs): Single tensor or dictionary containing the
+                following keys and values:
+                - tokens_list (Union[list[torch.Tensor | None], torch.Tensor]):
+                  Input token indices if pipeline parallelism is not enabled.
+                  If pipeline parallelism is enabled, this will be the input token indices
+                  for the ranks on the first pipeline stage. This will be the activation of the
+                  previous pipeline stage if the current rank is not on the first stage.
+                - prev_embed (torch.Tensor | None): Output token embeddings
+                  of previous Transformer layer (after output norm, before
+                  unembedding).
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            MTPInputsDict: Dictionary containing the following keys and
+                values:
+                - tokens_list (list[torch.Tensor | None]): Output logits
+                  after applying the Transformer model for each output token.
+                - prev_embed (torch.Tensor | None): Output token embeddings
+                  of previous Transformer layer (after output norm, before
+                  unembedding).
 
         """
-        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        if not isinstance(inputs, dict):
+            inputs = {"tokens_list": inputs}
+        tokens_list = inputs["tokens_list"]
+        start_pos = inputs.get("start_pos", -1)
+        prev_embed = inputs.get("prev_embed", None)
+        if not isinstance(tokens_list, list):
+            tokens = tokens_list
+            tokens_list = [None] * (1 + self.model_args.num_mtp_modules)
+            tokens_list[0] = tokens
+        else:
+            tokens = tokens_list[0]
 
+        if not self.model_args.use_flex_attn and start_pos >= 0:
+            raise ValueError(
+                "`start_pos >= 0`, but cannot use caching without FlexAttention"
+            )
+
+        seqlen = tokens.shape[1]
+
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = (
+            self.tok_embeddings(tokens[:, : self.model_args.max_seq_len])
+            if self.tok_embeddings
+            else tokens
+        )
+
+        if start_pos >= 0:
+            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        else:
+            freqs_cis = self.freqs_cis
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks=attention_masks)
+            h = layer(
+                h,
+                freqs_cis,
+                attention_masks=attention_masks,
+                start_pos=start_pos,
+            )
 
         h = self.norm(h) if self.norm else h
+
         output = self.output(h) if self.output else h
-        return output
+        tokens_list[0] = output
+
+        # Calculate multi-token predictions.
+
+        if self.model_args.num_mtp_modules > 0:
+            # Check if output norm is in this stage. If yes, assign the
+            # hidden embedding.
+            if self.norm and prev_embed is None:
+                prev_embed = h
+
+            for mtp_layer_id, mtp_layer in self.mtp_layers.items():
+                mtp_layer_id = int(mtp_layer_id)
+                token_offset = mtp_layer_id + 1
+                output, prev_embed = mtp_layer(
+                    tokens[
+                        :, token_offset : token_offset + self.model_args.max_seq_len
+                    ],
+                    prev_embed,
+                    freqs_cis,
+                    start_pos=start_pos,
+                )
+                tokens_list[mtp_layer_id + 1] = output
+
+        # PP compatibility hack
+        if self.model_args.num_mtp_modules > 0:
+            return {
+                "tokens_list": tokens_list,
+                "prev_embed": prev_embed,
+            }
+        else:
+            return tokens_list[0]
