@@ -13,7 +13,6 @@ import os
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable
-
 import tomli_w
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -157,7 +156,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.save_model_args(model_args)
 
         logger.info(
-            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor} "
+            f"with {json.dumps(dataclasses.asdict(model_args), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
