@@ -184,12 +184,13 @@ class TokenChoiceTopKRouter(nn.Module):
             ) = self._debug_force_load_balance_routing(scores)
 
         top_scores = top_scores / (top_scores.sum(dim=-1, keepdim=True) + 1e-20)
-        top_scores = top_scores * self.route_scale
 
         detached_top_scores = top_scores.detach()
         experts_entropy = (
             -(detached_top_scores * detached_top_scores.log()).sum(dim=-1).mean()
         )
+
+        top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
