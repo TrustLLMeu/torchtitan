@@ -57,12 +57,12 @@ def overwrite_config(model, model_args):
         ffn = model.layers["0"].feed_forward
         default_config["intermediate_size"] = ffn.hidden_dim
 
-    if len(model.layers) != default_config["num_hidden_layers"]:
-        moe = model.layers[str(default_config["num_hidden_layers"] - 1)].moe
+    if len(model.layers) > model_args.n_dense_layers:
+        moe = model.layers[str(len(model.layers) - 1)].moe
         default_config["moe_intermediate_size"] = moe.experts.dim_hidden
         default_config["n_active_experts"] = moe.topk
         default_config["n_total_experts"] = moe.num_experts
         default_config["moe_scaling_factor"] = moe.router.route_scale
-        default_config["n_shared_experts"] = moe_args.num_shared_experts
+        default_config["n_shared_experts"] = model_args.moe_args.num_shared_experts
 
     return default_config

@@ -491,7 +491,7 @@ class StagingMoEllamaMoE(nn.Module):
 
         # Scatter-add back to original token positions
         out = torch.zeros_like(x)
-        out = out.scatter_add(dim=0, index=token_indices_2d, src=weighted_output)
+        out = out.scatter_add(dim=0, index=token_indices_2d, src=weighted_output.to(out.dtype))
 
         return out  # [T, D]
 
