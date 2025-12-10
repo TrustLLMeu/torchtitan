@@ -140,7 +140,10 @@ class TokenChoiceTopKRouter(nn.Module):
         return selected_experts_indices, top_scores
 
     def forward(
-        self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
+        self,
+        x: torch.Tensor,
+        expert_bias: torch.Tensor | None = None,
+        need_aux_loss: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -175,6 +178,10 @@ class TokenChoiceTopKRouter(nn.Module):
             top_scores, selected_experts_indices = torch.topk(
                 scores, k=self.top_k, dim=1
             )
+        if need_aux_loss:
+            indices_for_load_balance = torch.topk(scores, k=self.top_k, dim=1)[1]
+        else:
+            indices_for_load_balance = None
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
@@ -206,6 +213,7 @@ class TokenChoiceTopKRouter(nn.Module):
             selected_experts_indices,
             num_tokens_per_expert,
             experts_entropy,
+            indices_for_load_balance,
         )
 
 
@@ -389,7 +397,10 @@ class MoE(nn.Module):
             selected_experts_indices,
             num_tokens_per_expert,
             experts_entropy,
-        ) = self.router(x, self.expert_bias)
+            indices_for_load_balance,
+        ) = self.router(
+            x, self.expert_bias, need_aux_loss=self.load_balance_coeff > 0.0
+        )
 
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
@@ -406,7 +417,7 @@ class MoE(nn.Module):
             if self.load_balance_loss_type == "sequence_wise":
                 load_balance_loss = MoE.sequence_wise_aux_loss(
                     sigmoid_scores,
-                    selected_experts_indices.long(),
+                    indices_for_load_balance.long(),
                     bz,
                     slen,
                     self.topk,
