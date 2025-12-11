@@ -6,6 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from random import Random
 from typing import Any, Callable
 
@@ -22,15 +23,9 @@ from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 
-def _load_c4_dataset(dataset_path: str, split: str):
-    """Load C4 dataset with default configuration."""
-    return _load_simple_dataset(
-        dataset_path,
-        dataset_name="en",
-        dataset_files=None,
-        dataset_split=split,
-        dataset_streaming=True,
-    )
+def _process_simple_text(sample: dict[str, Any], key: str) -> str:
+    """Process a simple custom dataset's sample text."""
+    return sample[key]
 
 
 def _process_c4_text(sample: dict[str, Any]) -> str:
@@ -55,19 +50,15 @@ def _load_simple_dataset(
     )
 
 
-def _process_simple_text(sample: dict[str, Any], key: str) -> str:
-    """Process a simple custom dataset's sample text."""
-    return sample[key]
-
-
-@dataclass
-class DatasetArgs:
-    path: str
-    name: str | None
-    files: str | Sequence[str] | None
-    split: str
-    streaming: bool
-    key: str
+def _load_c4_dataset(dataset_path: str, split: str):
+    """Load C4 dataset with default configuration."""
+    return _load_simple_dataset(
+        dataset_path,
+        dataset_name="en",
+        dataset_files=None,
+        dataset_split=split,
+        dataset_streaming=True,
+    )
 
 
 @dataclass
@@ -77,39 +68,21 @@ class DatasetConfig:
     text_processor: Callable
 
 
-# Add your dataset here here - more information at docs/datasets.md
 DATASETS = {
-    "c4": DatasetArgs(
+    "c4": DatasetConfig(
         path="allenai/c4",
-        name="en",
-        files=None,
-        split="train",
-        streaming=True,
-        key="text",
+        loader=partial(_load_c4_dataset, dataset_split="train"),
+        text_processor=partial(_process_simple_text, key="text"),
     ),
-    "c4_test": DatasetArgs(
+    "c4_test": DatasetConfig(
         path="tests/assets/c4_test",
-        name=None,
-        files=None,
-        split="train",
-        streaming=False,
-        key="text",
+        loader=partial(_load_simple_dataset, dataset_split="train"),
+        text_processor=partial(_process_simple_text, key="text"),
     ),
-    "c4_validation": DatasetArgs(
+    "c4_validation": DatasetConfig(
         path="allenai/c4",
-        name="en",
-        files=None,
-        split="validation",
-        streaming=True,
-        key="text",
-    ),
-    "fineweb": DatasetArgs(
-        path="HuggingFaceFW/fineweb",
-        name="default",
-        files=None,
-        split="train",
-        streaming=True,
-        key="text",
+        loader=partial(_load_c4_dataset, dataset_split="validation"),
+        text_processor=partial(_process_simple_text, key="text"),
     ),
     "simple_custom": None,
 }
@@ -133,30 +106,19 @@ def _validate_dataset(
 
     config = DATASETS[dataset_name]
     if config is None:
+        # that goes to simple_custom, we need to read everything from the config
         assert dataset_path is not None
-        config = DatasetArgs(
-            path=dataset_path,
-            name=dataset_inner_name,
-            files=dataset_files,
-            split=dataset_split,
-            streaming=dataset_streaming,
-            key=dataset_key,
-        )
-    if not isinstance(config, DatasetConfig):
-        assert isinstance(config, DatasetArgs)
-        old_config = config
         config = DatasetConfig(
-            path=old_config.path,
+            path=dataset_path,
             loader=lambda path: _load_simple_dataset(
                 path,
-                old_config.name,
-                old_config.files,
-                old_config.split,
-                old_config.streaming,
+                dataset_inner_name,
+                dataset_files,
+                dataset_split,
+                dataset_streaming,
             ),
-            text_processor=lambda sample: _process_simple_text(sample, old_config.key),
+            text_processor=lambda sample: _process_simple_text(sample, dataset_key),
         )
-
     path = dataset_path or config.path
     logger.info(f"Preparing {dataset_name} dataset from {path}")
     return path, config.loader, config.text_processor
