@@ -54,6 +54,7 @@ class TrainSpec:
     build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
+    hf_assets_setup_fn: Callable[..., None] | None = None
 
 
 _extra_train_specs: dict[str, TrainSpec] = {}

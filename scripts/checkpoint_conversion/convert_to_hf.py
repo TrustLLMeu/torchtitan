@@ -1,8 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# This new code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this new tree.
 
 import argparse
 from pathlib import Path
@@ -13,12 +13,62 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
+from dataclasses import is_dataclass, fields
+import torchtitan.models  # noqa: F401
+
+import json
+import shutil
+import os
+
+
+def update_dataclass_from_dict(target, data):
+    """
+    Recursively update `target` dataclass in-place using values from `data` (a dict).
+    - Only updates fields that exist on `target`.
+    - If a field on `target` is a dataclass and the corresponding value in `data`
+      is a dict, it recurses instead of overwriting the dataclass instance.
+    """
+    if not is_dataclass(target):
+        raise TypeError("target must be a dataclass instance")
+
+    for f in fields(target):
+        name = f.name
+        if name not in data:
+            continue
+
+        new_val = data[name]
+        old_val = getattr(target, name)
+
+        # If the existing value is a dataclass and new_val is a dict, recurse
+        if is_dataclass(old_val) and isinstance(new_val, dict):
+            update_dataclass_from_dict(old_val, new_val)
+        else:
+            # Otherwise just overwrite the value
+            setattr(target, name, new_val)
+
+
+def try_to_copy_tokenizer(output_dir, hf_assets_path):
+    """
+    if these files exist in the hf_assets_path, then copy them to the output_dir
+    """
+
+    tokenizer_assests_lists = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ]
+    for asset in tokenizer_assests_lists:
+        if os.path.exists(os.path.join(hf_assets_path, asset)):
+            shutil.copy(
+                os.path.join(hf_assets_path, asset), os.path.join(output_dir, asset)
+            )
 
 
 @torch.inference_mode()
 def convert_to_hf(
     input_dir,
     output_dir,
+    actual_model_args,
     model_name,
     model_flavor,
     hf_assets_path,
@@ -28,9 +78,12 @@ def convert_to_hf(
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
 
+    actual_model_args = json.load(open(actual_model_args, "r"))
+    update_dataclass_from_dict(model_args, actual_model_args)
+
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
-    model = ModelWrapper(model)
+        actual_model = train_spec.model_cls(model_args)
+    model = ModelWrapper(actual_model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
@@ -56,14 +109,19 @@ def convert_to_hf(
     )
 
     # map and apply export dtype if needed
-    target_dtype = TORCH_DTYPE_MAP[export_dtype]
-    if target_dtype != torch.float32:
-        hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
+    old_dtype = TORCH_DTYPE_MAP[export_dtype]
+    if old_dtype != torch.float32:
+        hf_state_dict = {k: v.to(old_dtype) for k, v in hf_state_dict.items()}
 
     dcp.save(
         hf_state_dict,
         storage_writer=storage_writer,
     )
+
+    try_to_copy_tokenizer(output_dir, hf_assets_path)
+
+    if train_spec.hf_assets_setup_fn is not None:
+        train_spec.hf_assets_setup_fn(actual_model, model_args, output_dir)
 
 
 if __name__ == "__main__":
@@ -74,6 +132,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "output_dir", type=Path, help="Output directory for HF checkpoint."
     )
+    parser.add_argument("model_args_file", type=str, help="Model args file.")
     parser.add_argument(
         "--hf_assets_path",
         type=Path,
@@ -95,6 +154,7 @@ if __name__ == "__main__":
     convert_to_hf(
         args.input_dir,
         args.output_dir,
+        args.model_args_file,
         args.model_name,
         args.model_flavor,
         args.hf_assets_path,
