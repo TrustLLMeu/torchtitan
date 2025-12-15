@@ -7,6 +7,7 @@
 import logging
 import re
 from typing import Any
+
 from torch.distributed.tensor import DTensor
 
 logger = logging.getLogger()
@@ -85,7 +86,9 @@ class MoEllamaStateDictAdapter(MoEStateDictAdapter):
             else n_heads
         )
         dim = self.model_args.dim
-        head_dim = dim // n_heads
+        head_dim = (
+            dim // n_heads if not self.model_args.head_dim else self.model_args.head_dim
+        )
         hf_state_dict = {}
 
         for key, value in state_dict.items():
@@ -107,9 +110,9 @@ class MoEllamaStateDictAdapter(MoEStateDictAdapter):
                 if "moe.experts" in key:
                     # Store the GroupedExperts Weight metadata for from_hf()
                     if isinstance(value, DTensor):
-                        self.grouped_expert_weight_placements[abstract_key] = (
-                            value.placements
-                        )
+                        self.grouped_expert_weight_placements[
+                            abstract_key
+                        ] = value.placements
                         self.grouped_expert_weight_shape[abstract_key] = value.shape
 
                         # Split GroupedExperts weight to local individual expert weights
