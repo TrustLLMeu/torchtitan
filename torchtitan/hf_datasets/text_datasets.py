@@ -154,6 +154,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
+        self.dataset_path = dataset_path
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._tokenizer = tokenizer
         self.infinite = infinite
@@ -175,22 +176,47 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
     def __iter__(self):
         while True:
+            num_yielded = 0
             for sample in self._get_data_iter():
-                # Use the dataset-specific text processor
-                sample_text = self._text_processor(sample)
-                sample_tokens = self._tokenizer.encode(
-                    sample_text, add_bos=True, add_eos=True
-                )
                 self._sample_idx += 1
+                # Use the dataset-specific text processor
+                try:
+                    sample_text = self._text_processor(sample)
+                except Exception:
+                    # bad row / missing key / load error -> skip, but state is correct
+                    continue
+
+                # Skip None / empty
+                if sample_text is None:
+                    continue
+                if isinstance(sample_text, str) and not sample_text.strip():
+                    continue
+
+                try:
+                    sample_tokens = self._tokenizer.encode(
+                        sample_text, add_bos=True, add_eos=True
+                    )
+                except Exception:
+                    # tokenization error -> skip, state is correct
+                    continue
+
+                num_yielded += 1
                 yield sample_tokens
 
             if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                logger.warning(
+                    f"HuggingFaceDataset {self.dataset_name} from {self.dataset_path} has run out of data"
+                )
+                break
+            elif num_yielded == 0:
+                # "HuggingFaceDataset (shard on this rank) yielded 0 samples. Stopping iteration to prevent infinite loop."
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                logger.warning(
+                    f"HuggingFaceDataset {self.dataset_name} from {self.dataset_path} is being re-looped"
+                )
                 # Ensures re-looping a dataset loaded from a checkpoint works correctly
                 if not isinstance(self._data, Dataset):
                     if hasattr(self._data, "set_epoch") and hasattr(
@@ -223,7 +249,10 @@ class MixedDataset(IterableDataset, Stateful):
         self.datasets = datasets
         self.weights = [1.0] * len(self.datasets) if weights is None else weights
 
-        self.num_sampled_per_dataset = [0] * len(self.datasets)
+        self.num_sampled_per_dataset = torch.zeros(
+            len(self.datasets), dtype=torch.int64
+        ).share_memory_()
+
         self._dataset_indices = list(range(len(self.datasets)))
         self._sample_idx = 0
         self._data_iters = None
@@ -267,6 +296,9 @@ class MixedDataset(IterableDataset, Stateful):
             sample = None
             # Handle exhausted data iterators.
             while sample is None:
+                if all(w == 0.0 for w in self.weights):
+                    self._data_iters = None
+                    return
                 dataset_index = self._sample_dataset(self._sample_idx)
                 sample = self._get_next(dataset_index)
 
@@ -328,6 +360,10 @@ class GreedyPackedDataset(IterableDataset, Stateful):
     def dataset_name(self):
         return self._data.dataset_name
 
+    @property
+    def dataset_path(self):
+        return self._data.dataset_path
+
     def _get_data_iter(self):
         # We don't use the sample index because we defer skipping to the
         # sub-dataset.
@@ -337,7 +373,9 @@ class GreedyPackedDataset(IterableDataset, Stateful):
         max_buffer_token_len = 1 + self.seq_len + self.num_mtp_tokens
 
         while True:
+            num_yielded = 0
             for sample_tokens in self._get_data_iter():
+                num_yielded += 1
                 self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
@@ -351,13 +389,18 @@ class GreedyPackedDataset(IterableDataset, Stateful):
 
             if not self.infinite:
                 logger.warning(
-                    f"Packed dataset {self.dataset_name} has run out of data"
+                    f"GreedyPackedDataset {self.dataset_name} from {self.dataset_path} has run out of data"
                 )
+                break
+            elif num_yielded == 0:
+                # "GreedyPackedDataset (shard on this rank) yielded 0 samples. Stopping iteration to prevent infinite loop."
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
-                logger.warning(f"Packed dataset {self.dataset_name} is being re-looped")
+                logger.warning(
+                    f"GreedyPackedDataset {self.dataset_name} from {self.dataset_path} is being re-looped"
+                )
                 # Ensures re-looping a dataset loaded from a checkpoint works correctly
                 if not isinstance(self._data, Dataset):
                     if hasattr(self._data, "set_epoch") and hasattr(

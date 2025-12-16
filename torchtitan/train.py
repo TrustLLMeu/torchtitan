@@ -147,8 +147,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config=job_config,
         )
 
-        logger.info(f"dataloader: {self.dataloader.dataset.weights}")
         self.data_mix_scheduler = build_data_mix_scheduler(self.dataloader, job_config)
+        self.data_mix_scheduler.step(0)
+        logger.info(
+            f"mixing weights at step 0: {self.data_mix_scheduler.get_log_dict_at_step(0)}"
+        )
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
@@ -718,6 +721,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
+        data_mix, data_sampled = self.data_mix_scheduler.get_log_dict_at_step(self.step)
+
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
@@ -732,6 +737,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     ft_pg,
                 ),
             )
+            ##############################################################
+            # to communicate the data sampled across ranks
+            sum_data_sampled = torch.stack(list(data_sampled.values()))
+            torch.distributed.all_reduce(
+                sum_data_sampled.to(self.device),
+                group=parallel_dims.world_mesh["dp_cp"].get_group(),
+                op=torch.distributed.ReduceOp.SUM,
+            )
+            data_sampled = {
+                k: sum_data_sampled[i] for i, k in enumerate(data_sampled.keys())
+            }
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -742,14 +758,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "lr": lr,
         }
         extra_metrics.update(self.optimizers.get_lrs())
-        extra_metrics.update(
-            {
-                f"data_mixing/{data_i}": weights_for_data_i
-                for data_i, weights_for_data_i in enumerate(
-                    self.data_mix_scheduler.get_weights_at_step(self.step)
-                )
-            }
-        )
+        extra_metrics.update(data_mix)
+        extra_metrics.update(data_sampled)
 
         if need_to_calculate_norm:
             param_norms = self.optimizers.get_parameter_norms()

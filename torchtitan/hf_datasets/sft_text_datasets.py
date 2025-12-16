@@ -310,6 +310,12 @@ class SFTDataset(IterableDataset, Stateful):
             input_ids = enc["input_ids"][0]
             attention_mask = enc["attention_mask"][0]
 
+            if message["role"] == "assistant":
+                # Harmony-style: end of assistant turn
+                eos_id = self.tokenizer.eos_id
+                input_ids = torch.cat([input_ids, input_ids.new_tensor([eos_id])])
+                attention_mask = torch.cat([attention_mask, attention_mask.new_ones(1)])
+
         # remove system prompt if exists
         if index != 0 and message["role"] != "system":
             input_ids = input_ids[len(self.system_prompt) :]
