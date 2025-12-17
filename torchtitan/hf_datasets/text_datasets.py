@@ -274,9 +274,9 @@ class MixedDataset(IterableDataset, Stateful):
         return dataset_index
 
     def set_weights(self, weights: list[float]):
-        assert len(weights) == len(
-            self.datasets
-        ), "weights must have the same length as datasets"
+        assert len(weights) == len(self.datasets), (
+            "weights must have the same length as datasets"
+        )
         self.weights = weights
 
     def _get_next(self, dataset_index: int):
@@ -285,7 +285,9 @@ class MixedDataset(IterableDataset, Stateful):
             return next(data_iter)
         except StopIteration:
             dataset = self.datasets[dataset_index]
-            logger.warning(f"Removing {dataset.dataset_name} from data mix.")
+            logger.warning(
+                f"Removing {dataset.dataset_name} | {dataset.dataset_path} from data mix."
+            )
             self.weights[dataset_index] = 0.0
             return None
 
@@ -592,9 +594,9 @@ def build_text_dataloader(
     )
 
     if len(dataset_name) > 1:
-        assert (
-            dataset_files is None
-        ), "cannot supply dataset files when using multiple datasets"
+        assert dataset_files is None, (
+            "cannot supply dataset files when using multiple datasets"
+        )
     for d in [
         dataset_path,
         dataset_inner_name,
@@ -602,9 +604,9 @@ def build_text_dataloader(
         dataset_key,
         dataset_weights,
     ]:
-        assert (
-            len(d) == normed_list_length
-        ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        assert len(d) == normed_list_length, (
+            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        )
     hf_datasets = []
     for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
