@@ -247,7 +247,11 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 class MixedDataset(IterableDataset, Stateful):
     def __init__(self, datasets: list[IterableDataset], weights: list[float] | None):
         self.datasets = datasets
-        self.weights = [1.0] * len(self.datasets) if weights is None else weights
+
+        _initial_weights = [1.0] * len(self.datasets) if weights is None else weights
+        self.weights = torch.tensor(
+            _initial_weights, dtype=torch.float64
+        ).share_memory_()
 
         self.num_sampled_per_dataset = torch.zeros(
             len(self.datasets), dtype=torch.int64
@@ -268,16 +272,16 @@ class MixedDataset(IterableDataset, Stateful):
 
     def _sample_dataset(self, sample_idx: int):
         self._rng.seed(sample_idx)
-        dataset_index = self._rng.choices(self._dataset_indices, weights=self.weights)[
-            0
-        ]
+        dataset_index = self._rng.choices(
+            self._dataset_indices, weights=self.weights.tolist()
+        )[0]
         return dataset_index
 
     def set_weights(self, weights: list[float]):
-        assert len(weights) == len(self.datasets), (
-            "weights must have the same length as datasets"
-        )
-        self.weights = weights
+        assert len(weights) == len(
+            self.datasets
+        ), "weights must have the same length as datasets"
+        self.weights.copy_(torch.tensor(weights, dtype=torch.float64))
 
     def _get_next(self, dataset_index: int):
         data_iter = self._data_iters[dataset_index]
@@ -319,8 +323,12 @@ class MixedDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
-        self.weights = state_dict["weights"]
-        self.num_sampled_per_dataset = state_dict["num_sampled_per_dataset"]
+        loaded_weights = state_dict["weights"]
+        if isinstance(loaded_weights, torch.Tensor):
+            self.weights.copy_(loaded_weights)
+        else:
+            self.weights.copy_(torch.tensor(loaded_weights, dtype=torch.float64))
+        self.num_sampled_per_dataset.copy_(state_dict["num_sampled_per_dataset"])
 
         # Restore sub-datasets.
         dataset_dicts = state_dict["datasets"]
@@ -333,7 +341,7 @@ class MixedDataset(IterableDataset, Stateful):
     def state_dict(self):
         return {
             "sample_idx": self._sample_idx,
-            "weights": self.weights,
+            "weights": self.weights.tolist(),
             "num_sampled_per_dataset": self.num_sampled_per_dataset,
             "datasets": {
                 dataset.dataset_name: dataset.state_dict() for dataset in self.datasets
@@ -594,9 +602,9 @@ def build_text_dataloader(
     )
 
     if len(dataset_name) > 1:
-        assert dataset_files is None, (
-            "cannot supply dataset files when using multiple datasets"
-        )
+        assert (
+            dataset_files is None
+        ), "cannot supply dataset files when using multiple datasets"
     for d in [
         dataset_path,
         dataset_inner_name,
@@ -604,9 +612,9 @@ def build_text_dataloader(
         dataset_key,
         dataset_weights,
     ]:
-        assert len(d) == normed_list_length, (
-            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
-        )
+        assert (
+            len(d) == normed_list_length
+        ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
     hf_datasets = []
     for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
