@@ -354,6 +354,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.metrics.norms_to_log
         )
 
+        logger.info("Finished optimizer initialization")
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
@@ -376,6 +377,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
+
+        logger.info("Finished checkpoint manager initialization")
 
         self.activations_handling_ctx = get_act_offloading_ctx_manager(
             self.model_parts[0], enable_activation_offloading=False
