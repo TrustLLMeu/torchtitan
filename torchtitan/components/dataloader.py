@@ -16,6 +16,7 @@ from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.tools.logging import logger
 
+
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
 # According to PEP 479, raising a `StopIteration` or its subclass from within a
 # generator will wrap it in a `RuntimeError`. Since this exception is designed

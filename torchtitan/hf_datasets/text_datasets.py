@@ -628,6 +628,9 @@ def build_text_dataloader(
             buffer_size=job_config.training.dataset_shuffle_buffer_size,
             seed=job_config.training.dataset_seed,
         )
+    prefetch_factor = job_config.training.dataset_prefetch_factor
+    num_workers = job_config.training.dataset_num_workers
+    prefetch_factor = None if num_workers == 0 else prefetch_factor
 
     return ParallelAwareDataloader(
         dataset=hf_ds,
@@ -637,6 +640,7 @@ def build_text_dataloader(
         num_workers=job_config.training.dataset_num_workers,
         pin_memory=job_config.training.dataset_pin_memory,
         generator=rng,
+        prefetch_factor=prefetch_factor,
     )
 
 
@@ -677,6 +681,9 @@ def build_text_validation_dataloader(
         seq_len=seq_len,
         infinite=False,
     )
+    prefetch_factor = job_config.validation.dataset_prefetch_factor
+    num_workers = job_config.validation.dataset_num_workers
+    prefetch_factor = None if num_workers == 0 else prefetch_factor
 
     return ParallelAwareDataloader(
         dataset=hf_ds,
@@ -685,4 +692,5 @@ def build_text_validation_dataloader(
         batch_size=batch_size,
         num_workers=job_config.validation.dataset_num_workers,
         pin_memory=job_config.validation.dataset_pin_memory,
+        prefetch_factor=prefetch_factor,
     )

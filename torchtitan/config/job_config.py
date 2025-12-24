@@ -366,6 +366,9 @@ class Training:
     dataset_num_workers: int = 0
     """Number of data loader workers"""
 
+    dataset_prefetch_factor: int | None = 2
+    """Prefetch factor for the data loader"""
+
     dataset_pin_memory: bool = False
     """Whether to use memory pinning in the data loader"""
 
