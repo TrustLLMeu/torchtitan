@@ -372,12 +372,6 @@ class Training:
     dataset_pin_memory: bool = False
     """Whether to use memory pinning in the data loader"""
 
-    dataset_seed: int | None = None
-    """
-    Choose the base RNG seed used for data shuffling. By default,
-    use the same as `training.seed`.
-    """
-
     dataset_shuffle_buffer_size: int = 0
     """Buffer size of windowed shuffling buffer. 0 means no shuffling (the default)."""
 

@@ -23,6 +23,12 @@ from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 
+def list_tree_to_tuple(obj):
+    if isinstance(obj, list):
+        return tuple(list_tree_to_tuple(x) for x in obj)
+    return obj
+
+
 def _process_simple_text(sample: dict[str, Any], key: str) -> str:
     """Process a simple custom dataset's sample text."""
     return sample[key]
@@ -245,7 +251,13 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
 
 class MixedDataset(IterableDataset, Stateful):
-    def __init__(self, datasets: list[IterableDataset], weights: list[float] | None):
+    def __init__(
+        self,
+        datasets: list[IterableDataset],
+        dp_rank: int,
+        weights: list[float] | None,
+        seed: int | None = 0,
+    ):
         self.datasets = datasets
 
         _initial_weights = [1.0] * len(self.datasets) if weights is None else weights
@@ -260,7 +272,7 @@ class MixedDataset(IterableDataset, Stateful):
         self._dataset_indices = list(range(len(self.datasets)))
         self._sample_idx = 0
         self._data_iters = None
-        self._rng = Random(self._sample_idx)
+        self._rng = Random(seed + dp_rank)
 
     @property
     def normed_weights(self):
@@ -271,7 +283,6 @@ class MixedDataset(IterableDataset, Stateful):
         self._data_iters = [iter(dataset) for dataset in self.datasets]
 
     def _sample_dataset(self, sample_idx: int):
-        self._rng.seed(sample_idx)
         dataset_index = self._rng.choices(
             self._dataset_indices, weights=self.weights.tolist()
         )[0]
@@ -330,11 +341,12 @@ class MixedDataset(IterableDataset, Stateful):
             self.weights.copy_(torch.tensor(loaded_weights, dtype=torch.float64))
         self.num_sampled_per_dataset.copy_(state_dict["num_sampled_per_dataset"])
 
+        state_dict["rng_state"] = list_tree_to_tuple(state_dict["rng_state"])
+        self._rng.setstate(state_dict["rng_state"])
         # Restore sub-datasets.
         dataset_dicts = state_dict["datasets"]
         for dataset in self.datasets:
             dataset.load_state_dict(dataset_dicts[dataset.dataset_name])
-
         # Unset data iterators so they will be re-initialized.
         self._data_iters = None
 
@@ -346,6 +358,7 @@ class MixedDataset(IterableDataset, Stateful):
             "datasets": {
                 dataset.dataset_name: dataset.state_dict() for dataset in self.datasets
             },
+            "rng_state": self._rng.getstate(),
         }
 
 
@@ -439,6 +452,7 @@ class WindowShuffledDataset(IterableDataset, Stateful):
         self,
         dataset: IterableDataset,
         *,
+        dp_rank: int,
         buffer_size: int = 10000,
         seed: int | None = 0,
     ) -> None:
@@ -448,7 +462,7 @@ class WindowShuffledDataset(IterableDataset, Stateful):
         self.buffer_size = buffer_size
         self._enabled = True
         self._initial_seed = seed
-        self._rng = Random(self._initial_seed)
+        self._rng = Random(self._initial_seed + dp_rank)
 
     def set_shuffle(self, shuffle: bool = True):
         self._enabled = shuffle
@@ -479,11 +493,6 @@ class WindowShuffledDataset(IterableDataset, Stateful):
         self._rng.seed(self._initial_seed)
 
     def load_state_dict(self, state_dict):
-        def list_tree_to_tuple(obj):
-            if isinstance(obj, list):
-                return tuple(list_tree_to_tuple(x) for x in obj)
-            return obj
-
         # This should not be required and doesn't pop up during testing,
         # but we add it for safety.
         state_dict["rng_state"] = list_tree_to_tuple(state_dict["rng_state"])
@@ -539,8 +548,7 @@ def build_text_dataloader(
     rng = torch.Generator()
     dataset_streaming = job_config.training.dataset_streaming
 
-    if job_config.training.dataset_seed is not None:
-        rng.manual_seed(job_config.training.dataset_seed)
+    rng.manual_seed(job_config.debug.seed)
 
     num_mtp_tokens = job_config.training.num_mtp_tokens
     dataset_weights = job_config.training.dataset_weights
@@ -610,7 +618,9 @@ def build_text_dataloader(
 
     # First pack, then mix → data is only mixed in batch dimension.
     # First mix, then pack → data is also mixed inside packed sample.
-    hf_ds = MixedDataset(hf_datasets, dataset_weights)
+    hf_ds = MixedDataset(
+        hf_datasets, dp_rank, dataset_weights, seed=job_config.debug.seed
+    )
     if dataset_mix_in_seq:
         hf_ds = GreedyPackedDataset(
             dataset=hf_ds,
@@ -619,14 +629,12 @@ def build_text_dataloader(
             num_mtp_tokens=num_mtp_tokens,
         )
 
-    if job_config.training.dataset_seed is None:
-        job_config.training.dataset_seed = job_config.debug.seed
-
     if job_config.training.dataset_shuffle_buffer_size:
         hf_ds = WindowShuffledDataset(
             hf_ds,
+            dp_rank=dp_rank,
             buffer_size=job_config.training.dataset_shuffle_buffer_size,
-            seed=job_config.training.dataset_seed,
+            seed=job_config.debug.seed,
         )
     prefetch_factor = job_config.training.dataset_prefetch_factor
     num_workers = job_config.training.dataset_num_workers
