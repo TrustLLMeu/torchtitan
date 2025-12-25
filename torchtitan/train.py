@@ -737,15 +737,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             ##############################################################
             # to communicate the data sampled across ranks
-            sum_data_sampled = torch.stack(list(data_sampled.values()))
+            keys = sorted(data_sampled.keys())
+            sum_data_sampled = torch.stack([data_sampled[k] for k in keys]).to(self.device)
+
             torch.distributed.all_reduce(
-                sum_data_sampled.to(self.device),
+                sum_data_sampled,
                 group=parallel_dims.world_mesh["dp_cp"].get_group(),
                 op=torch.distributed.ReduceOp.SUM,
             )
-            data_sampled = {
-                k: sum_data_sampled[i] for i, k in enumerate(data_sampled.keys())
-            }
+
+            data_sampled = {k: int(sum_data_sampled[i].item()) for i, k in enumerate(keys)}
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
