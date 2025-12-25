@@ -11,13 +11,21 @@ from typing import Callable, TypeAlias
 import torch
 
 from torchtitan.config import JobConfig
+from torchtitan.models.inputs import MoEInputsDict, MTPInputsDict, TransformerInputsDict
 from torchtitan.tools.logging import logger
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def cross_entropy_loss(
+    pred: torch.Tensor | list[torch.Tensor] | TransformerInputsDict,
+    labels: torch.Tensor,
+) -> torch.Tensor:
     """Common cross-entropy loss function for Transformer models training."""
+    if isinstance(pred, dict):
+        pred = pred["tokens_list"]
+    if isinstance(pred, list):
+        pred = pred[0]
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(), labels.flatten(0, 1)
     )
@@ -57,6 +65,55 @@ class RescaleAccumulatedLoss:
             yield
         finally:
             self.skip_rescale = previous
+
+
+def multi_token_cross_entropy_loss(
+    preds: list[torch.Tensor] | MTPInputsDict,
+    labels: torch.Tensor,
+    loss_fn: LossFunction,
+    job_config: JobConfig,
+) -> torch.Tensor:
+    """Multi-token cross-entropy loss function for Transformer model training.
+
+    Based on DeepSeek-V3 technical report: https://arxiv.org/abs/2412.19437.
+    """
+    if isinstance(preds, dict):
+        preds = preds["tokens_list"]
+    assert isinstance(preds, list)
+    main_loss = loss_fn(preds[0], labels[:, : job_config.training.seq_len])
+
+    mtp_loss = 0
+    for label_offset, pred in enumerate(preds[1:], 1):
+        loss = loss_fn(
+            pred,
+            labels[:, label_offset : label_offset + job_config.training.seq_len],
+        )
+        # Take average over MTP predictions.
+        loss = loss / job_config.training.num_mtp_tokens
+        mtp_loss = mtp_loss + loss
+    return main_loss + mtp_loss * job_config.training.mtp_loss_weight
+
+
+def moe_loss(
+    pred: MoEInputsDict,
+    labels: torch.Tensor,
+    loss_fn: LossFunction,
+) -> torch.Tensor:
+    """Sequence-wise auxiliary loss-enhanced loss function for MoE Transformer
+    model training.
+    """
+    if isinstance(pred, dict) and "load_balance_loss" in pred:
+        loss = loss_fn(pred["tokens_list"][0], labels)
+        aux_loss = pred["load_balance_loss"]
+        # USE STE to make the magnitude of loss remain the same
+        loss = loss + (aux_loss - aux_loss.detach())
+    elif isinstance(pred, tuple):
+        pred, aux_loss = pred
+        loss = loss_fn(pred, labels)
+        loss = loss + (aux_loss - aux_loss.detach())
+    else:
+        loss = loss_fn(pred, labels)
+    return loss
 
 
 def rescale_accumulated_loss(unwrapped_loss_fn, accumulation_steps):

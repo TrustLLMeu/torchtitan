@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Generic, Iterator, TypeVar
+import queue
+import threading
+from typing import Any, Callable, Generic, Iterator, TypeVar
 
 import torch
 import torch.nn as nn
@@ -21,6 +23,14 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.optimizers import (
+    create_disco_optimizer_kwargs_from_optimizer_config,
+    create_disco_param_groups,
+    DiSCO,
+    naive_param_norm,
+)
+from torchtitan.tools.logging import logger
+
 
 __all__ = [
     "OptimizersContainer",
@@ -74,8 +84,19 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
+        # Whether to keep old LR values when loading.
+        self.preserve_lrs_when_loading = False
+        self.norms_to_log: list[str] | None = None
+        self.log_queue: queue.Queue | None = None
+        self.log_thread: threading.Thread | None = None
+
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
+            if issubclass(optimizer_cls, DiSCO):
+                params, optimizer_kwargs = create_disco_param_groups(
+                    model, optimizer_kwargs
+                )
+            else:
+                params = [p for p in model.parameters() if p.requires_grad]
             self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
             all_params.extend(params)
         self._validate_length(len(self.model_parts))
@@ -107,6 +128,12 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if self.preserve_lrs_when_loading:
+            # Store current learning rates
+            prev_lrs = []
+            for optimizer in self.optimizers:
+                prev_lrs.append([group["lr"] for group in optimizer.param_groups])
+
         func = functools.partial(
             set_optimizer_state_dict,
             optim_state_dict=state_dict,
@@ -114,11 +141,76 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         )
         list(map(func, self.model_parts, self.optimizers))
 
+        if self.preserve_lrs_when_loading:
+            # Restore the original learning rates
+            for optimizer, optim_prev_lrs in zip(self.optimizers, prev_lrs):
+                for param_group, prev_lr in zip(optimizer.param_groups, optim_prev_lrs):
+                    if param_group["lr"] != prev_lr:
+                        logger.warning(
+                            f"Restoring lr from {param_group['lr']} to {prev_lr} | "
+                            f"for {param_group['param_names']}"
+                        )
+                        param_group["lr"] = prev_lr
+
+    def calculate_norm_at_next_step(self):
+        # for Disco, we tell the optimizer to calculate the norm at next step
+        # in the step() function
+        for i, _ in enumerate(self.model_parts):
+            optimizer = self.optimizers[i]
+            if isinstance(optimizer, DiSCO):
+                optimizer.calculate_norm_at_next_step(self.norms_to_log)
+
+    def get_parameter_norms(self):
+        all_norms = {}
+        for i, model_part in enumerate(self.model_parts):
+            # NB: assumes correspondences between model parts and optimizers
+            optimizer = self.optimizers[i]
+            for group in optimizer.param_groups:
+                if isinstance(optimizer, DiSCO):
+                    all_norms.update(optimizer.get_norms_at_current_step())
+                else:
+                    all_norms.update(
+                        naive_param_norm.get_parameter_norms(
+                            [model_part],
+                            [optimizer],
+                            self.norms_to_log,
+                        )
+                    )
+                # # To Debug, we can force using naive_param_norm
+                # all_norms.update(
+                #     naive_param_norm.get_parameter_norms([model_part], [optimizer])
+                # )
+
+        return all_norms
+
+    def get_lrs(self):
+        lrs = {}
+        for i, optimizer in enumerate(self.optimizers):
+            for k, group in enumerate(optimizer.param_groups):
+                lrs[f"lr/opt_{i}/group_{k}"] = group["lr"]
+        return lrs
+
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(self.optimizers), (
             "Must pass one optimizer per model part or per param if "
             "using OptimizersInBackwardContainer."
         )
+
+    def set_up_async_logging(self, log_fn: Callable):
+        self.log_queue = queue.Queue()
+        self.log_thread = threading.Thread(target=log_fn, args=(self.log_queue,))
+        self.log_thread.start()
+        return self.log_queue
+
+    def close(self):
+        if self.log_queue is not None:
+            self.log_queue.put(None)
+        if self.log_thread is not None:
+            self.log_thread.join()
+
+    def join_log_queue(self):
+        if self.log_queue is not None:
+            self.log_queue.join()
 
     def _post_init(
         self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]
@@ -246,6 +338,7 @@ def build_optimizers(
     optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
     ft_manager: FTManager | None = None,
+    extra_kwargs: dict[str, Any] | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -287,24 +380,36 @@ def build_optimizers(
     eps = optimizer_config.eps
     weight_decay = optimizer_config.weight_decay
 
-    optim_implementation = optimizer_config.implementation
-    assert optim_implementation in ["fused", "foreach", "for-loop"]
+    width_multiplier = 1
+    if name in ["Adam", "AdamW"]:
+        optim_implementation = optimizer_config.implementation
+        assert optim_implementation in ["fused", "foreach", "for-loop"]
 
-    fused = optim_implementation == "fused"
-    foreach = optim_implementation == "foreach"
+        fused = optim_implementation == "fused"
+        foreach = optim_implementation == "foreach"
 
-    optimizer_kwargs = {
-        "lr": lr,
-        "betas": (beta1, beta2),
-        "eps": eps,
-        "weight_decay": weight_decay,
-        "fused": fused,
-        "foreach": foreach,
-    }
+        width_multiplier = optimizer_config.mup_width_multiplier
+
+        optimizer_kwargs = {
+            "lr": lr / width_multiplier,
+            "betas": (beta1, beta2),
+            "eps": eps / width_multiplier,
+            "weight_decay": weight_decay
+            * width_multiplier,  # WD is coupled with LR in torch AdamW
+            "fused": fused,
+            "foreach": foreach,
+        }
+    elif name in ["DiSCO"]:
+        optimizer_kwargs = create_disco_optimizer_kwargs_from_optimizer_config(
+            optimizer_config, parallel_dims
+        )
+    else:
+        raise NotImplementedError(f"Optimizer {name} not added.")
 
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
+        "DiSCO": DiSCO,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
@@ -327,6 +432,52 @@ def build_optimizers(
     return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
 
+def moe_metrics_worker(log_queue: queue.Queue):
+    """
+    This function runs in the background. It waits for data,
+    does the slow CPU work, and assigns the final dictionary.
+    """
+    while True:
+        # 1. Wait for data from the main thread
+        data = log_queue.get()
+        if data is None:  # Sentinel to stop the thread
+            break
+
+        (
+            moe_layers_info,
+            all_usages_cpu,
+            all_biases_cpu,
+            all_entropies_cpu,
+            all_load_balance_losses_cpu,
+            num_experts,
+        ) = data
+
+        usage_offset = bias_offset = 0
+        for i, info in enumerate(moe_layers_info):
+            moe = info["module"]
+            layer_id = info["layer_id"]
+
+            metrics = {f"moe_entropy/L-{layer_id}": all_entropies_cpu[i]}
+            layer_usages = all_usages_cpu[usage_offset : usage_offset + num_experts]
+            layer_biases = all_biases_cpu[bias_offset : bias_offset + num_experts]
+
+            pre_usage = f"moe_ep_usage/L-{layer_id}_EP-"
+            pre_bias = f"moe_bias/L-{layer_id}_EP-"
+            metrics.update({f"{pre_usage}{j}": v for j, v in enumerate(layer_usages)})
+            metrics.update({f"{pre_bias}{j}": v for j, v in enumerate(layer_biases)})
+            metrics.update(
+                {
+                    f"moe_load_balance_loss/L-{layer_id}": v
+                    for v in all_load_balance_losses_cpu
+                }
+            )
+            moe._log_expert_metrics = metrics
+            usage_offset += num_experts
+            bias_offset += num_experts
+
+        log_queue.task_done()
+
+
 def build_optimizers_with_moe_load_balancing(
     model_parts: list[nn.Module],
     optimizer_config: OptimizerConfig,
@@ -340,13 +491,25 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
-        for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
-                if transformer_block.moe_enabled:
-                    # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    return bool(transformer_block.moe.load_balance_coeff)
-        return False
+    log_queue = optimizers.set_up_async_logging(moe_metrics_worker)
+
+    def lmo_for_moe_bias(
+        g,
+        norm_factor="sign",
+        epsilon=1e-32,
+    ):
+        if norm_factor in ["sign", "sign_zero_mean"]:
+            return torch.sign(g)
+        elif norm_factor in ["spectral", "spectral_zero_mean"]:
+            is_flat = g.dim() == 1
+            g = g.unsqueeze(0) if is_flat else g
+            norms = torch.linalg.norm(g, ord=2, dim=1, keepdim=True)
+            g = g / torch.clamp(norms, min=epsilon)
+            g = g.squeeze(0) if is_flat else g
+            return g
+
+    def need_rescale_stats(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
@@ -356,57 +519,151 @@ def build_optimizers_with_moe_load_balancing(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
     ):
+        """
+        Lets assume all MoE layers have same amount of experts.
+        """
+
         dp_cp_mesh = (
             parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
         )
+        is_dp_rank_0 = (
+            torch.distributed.get_rank(dp_cp_mesh.get_group()) == 0
+            if dp_cp_mesh is not None
+            else True
+        )
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
-        tokens_per_expert_list = []
-        for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
-                if not transformer_block.moe_enabled:
-                    continue
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
-                tokens_per_expert = transformer_block.moe.tokens_per_expert
-                if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
-                    # This does not affect to expert choice, but affects the experts usage metrics.
-                    # We divide by 2 to correct for this double-counting due to recomputation
-                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert = tokens_per_expert // 2
-                tokens_per_expert_list.append(tokens_per_expert)
 
-        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
+        moe_layers_info = []
+        tok_buffers, ent_buffers, load_balance_loss_buffers = [], [], []
+        acc_fwd_times_buffers = []
+        scale_factor = 1
+        num_experts = 0
+
+        for part in model_parts:
+            for block in part.layers.values():
+                if not block.moe_enabled:
+                    continue
+                moe = block.moe
+                # Assuming num_experts is the same for all, so we can just grab it once
+                num_experts = moe.tokens_per_expert.numel()
+                moe_layers_info.append(
+                    {
+                        "module": moe,
+                        "layer_id": block.layer_id,
+                    }
+                )
+                tok_buffers.append(moe.tokens_per_expert)
+                ent_buffers.append(moe.router_entropy)
+                # if need_rescale_stats(moe) or need_rescale_stats(block):
+                #     scale_factor = 0.5
+                acc_fwd_times_buffers.append(moe.acc_fwd_times)
+                load_balance_loss_buffers.append(moe.load_balance_loss)
+        # Early exit if no MoE layers were found
+        if not moe_layers_info:
+            return
+
+        # assume all MoE layers are same
+        scale_factor = acc_fwd_times_buffers[-1]
+
+        all_tokens = torch.cat(tok_buffers)
+        all_entropies = torch.cat(ent_buffers)
+        all_load_balance_losses = torch.cat(load_balance_loss_buffers)
+        if scale_factor != 1:
+            all_tokens = all_tokens // scale_factor  # tokens count are integers
+            all_entropies = all_entropies / scale_factor  # entropies are floats
 
         if dp_cp_mesh is not None:
-            # Perform single all-reduce to get global statistics across all processes
             pg = dp_cp_mesh.get_group()
             torch.distributed.all_reduce(
-                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
+                all_tokens, group=pg, op=torch.distributed.ReduceOp.SUM
             )
+            torch.distributed.all_reduce(
+                all_entropies, group=pg, op=torch.distributed.ReduceOp.AVG
+            )
+            torch.distributed.all_reduce(
+                all_load_balance_losses, group=pg, op=torch.distributed.ReduceOp.AVG
+            )
+        num_layers = len(moe_layers_info)
+        lens = torch.full(
+            (num_layers,), num_experts, device=all_tokens.device, dtype=torch.long
+        )
+        grp = torch.repeat_interleave(
+            torch.arange(num_layers, device=all_tokens.device, dtype=torch.long), lens
+        )
 
-        moe_layer_idx = 0
+        layer_sums = torch.zeros(
+            num_layers, dtype=all_tokens.dtype, device=all_tokens.device
+        )
+        layer_sums.index_add_(0, grp, all_tokens)
+        layer_means = layer_sums / num_experts
+
+        # Vectorised deltas and usage
+        delta_flat = layer_means[grp] - all_tokens
+        recip = torch.clamp(layer_sums, min=1.0).reciprocal()
+        usage_flat = all_tokens * recip[grp]
+
+        # Vectorized bias update calculation (replaces the loop)
         with torch.no_grad():
-            for model_part in model_parts:
-                for transformer_block in model_part.layers.values():
-                    if not transformer_block.moe_enabled:
-                        continue
-                    moe = transformer_block.moe
+            # Get norm factor and load_balance_coeff from the first MoE layer (assuming they are all the same)
+            first_moe = moe_layers_info[0]["module"]
+            norm_factor = first_moe.bias_update_norm_factor
+            load_balance_coeff = first_moe.load_balance_coeff
 
-                    tokens_per_expert = tokens_per_expert_by_layer[
-                        moe_layer_idx
-                    ].float()
-                    moe_layer_idx += 1
+            # Reshape for batched, per-layer operations
+            delta_2d = delta_flat.view(num_layers, num_experts)
 
-                    # update the expert bias
-                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                        tokens_per_expert.mean() - tokens_per_expert
-                    )
-                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-                    moe.expert_bias.add_(expert_bias_delta)
-                    moe.tokens_per_expert.zero_()
+            # Calculate updates for all layers at once
+            updates_2d = lmo_for_moe_bias(delta_2d, norm_factor=norm_factor)
+
+            if norm_factor.endswith("zero_mean"):
+                updates_2d = updates_2d - updates_2d.mean(dim=1, keepdim=True)
+
+            # Collect all bias parameters and update them with a single multi-tensor op
+            bias_params = [info["module"].expert_bias for info in moe_layers_info]
+            updates_list = list(updates_2d.flatten().split(num_experts))
+
+            torch._foreach_add_(bias_params, updates_list, alpha=load_balance_coeff)
+
+            # Reset router stats in bulk
+            try:
+                torch._foreach_mul_(tok_buffers, 0)
+                torch._foreach_mul_(ent_buffers, 0.0)
+                torch._foreach_mul_(acc_fwd_times_buffers, 0)
+                torch._foreach_mul_(load_balance_loss_buffers, 0.0)
+            except Exception:
+                for t in tok_buffers:
+                    t.zero_()
+                for t in ent_buffers:
+                    t.zero_()
+                for t in acc_fwd_times_buffers:
+                    t.zero_()
+                for t in load_balance_loss_buffers:
+                    t.zero_()
+
+            if is_dp_rank_0:
+                all_usages_cpu = usage_flat.cpu().tolist()
+                all_biases_cpu = torch.cat(bias_params).cpu().tolist()
+                all_entropies_cpu = all_entropies.cpu().float().tolist()
+                all_load_balance_losses_cpu = (
+                    all_load_balance_losses.cpu().float().tolist()
+                )
+                payload = (
+                    moe_layers_info,
+                    all_usages_cpu,
+                    all_biases_cpu,
+                    all_entropies_cpu,
+                    all_load_balance_losses_cpu,
+                    num_experts,
+                )
+                log_queue.put(payload)
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if transformer_block.moe_enabled:
+                    return True
+        return False
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

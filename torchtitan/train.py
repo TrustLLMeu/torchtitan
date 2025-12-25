@@ -4,27 +4,44 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
+import datetime
+import functools
 import importlib
+import json
 import os
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable
 
+import tomli_w
 import torch
-
 from torch.distributed.elastic.multiprocessing.errors import record
 
+import torchtitan.models  # noqa: F401
+
 import torchtitan.protocols.train_spec as train_spec_module
+from torchtitan.components.activation_offload import get_act_offloading_ctx_manager
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data_mix_scheduler import (
+    build_data_mix_scheduler,
+    DataMixScheduler,
+)
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import (
+    build_cross_entropy_loss,
+    moe_loss,
+    multi_token_cross_entropy_loss,
+    rescale_accumulated_loss,
+)
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.optimizers import norm_helper
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -43,6 +60,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # swappable training components in TrainSpec
     tokenizer: train_spec_module.BaseTokenizer | None
     dataloader: train_spec_module.BaseDataLoader
+    data_mix_scheduler: DataMixScheduler
     model_parts: list[torch.nn.Module]
     loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
@@ -73,6 +91,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.job_config = job_config
+        self.save_job_config()
 
         logger.info(f"Starting job: {job_config.job.description}")
 
@@ -128,20 +147,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config=job_config,
         )
 
+        self.data_mix_scheduler = build_data_mix_scheduler(self.dataloader, job_config)
+        self.data_mix_scheduler.step(0)
+        logger.info(
+            f"mixing weights at step 0: {self.data_mix_scheduler.get_log_dict_at_step(0)}"
+        )
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        model_args.update_from_config(job_config, tokenizer=self.tokenizer)
         self.model_args = model_args
+        self.save_model_args(model_args)
 
         logger.info(
-            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor} "
+            f"with {json.dumps(dataclasses.asdict(model_args), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
             model = self.train_spec.model_cls(model_args)
+
+        logger.info(f"model: {model}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -160,13 +188,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # calculate model size and flops per token
         (
+            active_param,
+            embedding_param,
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
-            f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+            f"{color.blue}Model {job_config.model.name} - {job_config.model.flavor} - "
+            f"Flops: {self.metrics_processor.num_flops_per_token:,}"
+        )
+        logger.info(
+            f"{color.red}total parameters: {model_param_count:,} | "
+            f"active: {active_param:,} | embedding: {embedding_param:,} {color.reset}"
         )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
@@ -183,6 +217,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.loss_fn = self.train_spec.build_loss_fn(
             job_config, parallel_dims=parallel_dims, ft_manager=self.ft_manager
         )
+
+        # better with some flag to enable/disable this
+        pre_moe_loss_fn = self.loss_fn
+        self.loss_fn = functools.partial(
+            moe_loss,
+            loss_fn=pre_moe_loss_fn,
+        )
+
+        if job_config.training.num_mtp_tokens > 0:
+            assert (
+                self.train_spec.build_loss_fn is build_cross_entropy_loss
+            ), "MTP requires cross-entropy loss"
+            pre_mtp_loss_fn = self.loss_fn
+            self.loss_fn = functools.partial(
+                multi_token_cross_entropy_loss,
+                loss_fn=pre_mtp_loss_fn,
+                job_config=job_config,
+            )
 
         # verify batch sizes
         global_batch_size = job_config.training.global_batch_size
@@ -207,6 +259,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.loss_fn = rescale_accumulated_loss(
             self.loss_fn, self.gradient_accumulation_steps
         )
+
+        # Figure out whether model will be loaded, so that we can skip weight initialization.
+        """
+        Comment: *Important*:
+        Science we have some `persistent=False` buffers, such as `freqs_cis`,
+        we *CANNOT* skip weight initialization. because they will not be loaded from the checkpoint.
+        """
+        # skip_weight_init = CheckpointManager.can_skip_weight_init(job_config)
+        skip_weight_init = False
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -237,8 +298,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             for m in self.model_parts:
                 m.to_empty(device=init_device)
-                with torch.no_grad():
-                    m.init_weights(buffer_device=buffer_device)
+                if not skip_weight_init:
+                    with torch.no_grad():
+                        m.init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -248,8 +310,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
 
             model.to_empty(device=init_device)
-            with torch.no_grad():
-                model.init_weights(buffer_device=buffer_device)
+            if not skip_weight_init:
+                with torch.no_grad():
+                    model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -269,7 +332,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
+            self.model_parts,
+            job_config.optimizer,
+            parallel_dims,
+            self.ft_manager,
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config.lr_scheduler, job_config.training.steps
@@ -284,7 +350,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
+        self.optimizers.norms_to_log = norm_helper.get_norms_to_log(
+            job_config.metrics.norms_to_log
+        )
 
+        logger.info("Finished optimizer initialization")
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
@@ -306,6 +376,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
+        )
+
+        logger.info("Finished checkpoint manager initialization")
+
+        self.activations_handling_ctx = get_act_offloading_ctx_manager(
+            self.model_parts[0], enable_activation_offloading=False
         )
 
         loss_parallel_enabled = (
@@ -358,6 +434,47 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
+    def save_job_config(self):
+        if os.environ["RANK"] == "0":
+            # Save job config to dump folder.
+            os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
+            job_config_save_path = os.path.join(
+                self.job_config.job.dump_folder,
+                "job_config_"
+                + datetime.datetime.now().strftime("%Y%m%d-%H%M")
+                + ".json",
+            )
+            config_dict = self.job_config.to_dict()
+            with open(job_config_save_path, "w") as f:
+                json.dump(config_dict, f, indent=4)
+
+            clean_config_dict = {}
+            for header, subdict in config_dict.items():
+                clean_subdict = {}
+                clean_config_dict[header] = clean_subdict
+                for key, value in subdict.items():
+                    if value is not None:
+                        clean_subdict[key] = value
+
+            with open(job_config_save_path.replace(".json", ".toml"), "wb") as f:
+                tomli_w.dump(clean_config_dict, f)
+
+    def save_model_args(self, model_args: train_spec_module.BaseModelArgs):
+        if torch.distributed.get_rank() == 0:
+            # Save model args to dump folder.
+            os.makedirs(self.job_config.job.dump_folder, exist_ok=True)
+            model_args_save_path = os.path.join(
+                self.job_config.job.dump_folder,
+                "model_args_"
+                + datetime.datetime.now().strftime("%Y%m%d-%H%M")
+                + ".json",
+            )
+
+            model_args_dict = dataclasses.asdict(model_args)
+            model_args_dict.pop("_enforced")
+            with open(model_args_save_path, "w") as f:
+                json.dump(model_args_dict, f, indent=4)
+
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config
         dist_utils.init_distributed(
@@ -397,6 +514,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
+
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
@@ -472,6 +590,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
+
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         optional_context_parallel_ctx = (
@@ -488,7 +607,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context(
+                optional_context_parallel_ctx,
+                # self.activations_handling_ctx,
+            ):
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
@@ -521,7 +643,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context(
+                optional_context_parallel_ctx,
+                # self.activations_handling_ctx,
+            ):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
@@ -546,23 +671,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         accumulated_losses = []
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
+        fwd_bwd_start = time.perf_counter()
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
+        self.metrics_processor.fwd_bwd_times.append(time.perf_counter() - fwd_bwd_start)
+
+        grad_norm = None
+        if self.job_config.training.max_norm > 0:
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=(
+                    parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+                ),
+                ep_enabled=parallel_dims.ep_enabled,
+            )
         self.checkpointer.maybe_wait_for_staging()
+
+        # Here we let the optimizer know that we need to calculate the
+        # norm at the next step
+        need_to_calculate_norm = (
+            self.job_config.metrics.log_norm_freq > 0
+            and self.metrics_processor.should_log(self.step)
+            and (
+                self.step == 1 or self.step % self.job_config.metrics.log_norm_freq == 0
+            )
+        )
+        if need_to_calculate_norm:
+            self.optimizers.calculate_norm_at_next_step()
+
+        optim_step_start = time.perf_counter()
         self.optimizers.step()
         self.lr_schedulers.step()
+        self.data_mix_scheduler.step(self.step + 1)
+        self.metrics_processor.optim_step_times.append(
+            time.perf_counter() - optim_step_start
+        )
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -570,6 +718,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
+
+        data_mix, data_sampled = self.data_mix_scheduler.get_log_dict_at_step(self.step)
 
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
@@ -585,6 +735,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     ft_pg,
                 ),
             )
+            ##############################################################
+            # to communicate the data sampled across ranks
+            keys = sorted(data_sampled.keys())
+            sum_data_sampled = torch.stack([data_sampled[k] for k in keys]).to(self.device)
+
+            torch.distributed.all_reduce(
+                sum_data_sampled,
+                group=parallel_dims.world_mesh["dp_cp"].get_group(),
+                op=torch.distributed.ReduceOp.SUM,
+            )
+
+            data_sampled = {k: int(sum_data_sampled[i].item()) for i, k in enumerate(keys)}
+
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
@@ -593,11 +756,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        extra_metrics.update(self.optimizers.get_lrs())
+        extra_metrics.update(data_mix)
+        extra_metrics.update(data_sampled)
+
+        if need_to_calculate_norm:
+            param_norms = self.optimizers.get_parameter_norms()
+            extra_metrics.update(param_norms)
+
+        self.optimizers.join_log_queue()
+        for model_part in self.model_parts:
+            for layer in model_part.layers.values():
+                if not hasattr(layer, "moe") or not hasattr(
+                    layer.moe, "_log_expert_metrics"
+                ):
+                    continue
+                extra_metrics.update(layer.moe._log_expert_metrics)
+
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            grad_norm.item() if grad_norm is not None else grad_norm,
             extra_metrics=extra_metrics,
         )
 
@@ -607,6 +787,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
+
+        self.data_mix_scheduler.step(self.step)
+        # lets over write the weights for the first step in case the weights are not set in configs
+        # cause for now the data mixing scheduler is stateless
 
         leaf_folder = (
             ""
@@ -703,6 +887,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
 
+        optimizers = getattr(self, "optimizers", None)
+        if optimizers is not None and hasattr(optimizers, "close"):
+            optimizers.close()
+
 
 def main(trainer_class: type[Trainer]) -> None:
     """Main entry point for training with a specified trainer class.
@@ -738,6 +926,7 @@ def main(trainer_class: type[Trainer]) -> None:
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -133,7 +133,15 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
+    def __init__(
+        self,
+        log_dir: str,
+        job_config: JobConfig,
+        tag: str | None = None,
+        project: str | None = None,
+        group: str | None = None,
+        name: str | None = None,
+    ):
         # Import wandb here to avoid startup import
         import wandb
 
@@ -143,10 +151,15 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
+        if project is None:
+            project = os.getenv("WANDB_PROJECT", "torchtitan")
+        if name is None:
+            name = os.getenv("WANDB_RUN_NAME", None)
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
-            project=os.getenv("WANDB_PROJECT", "torchtitan"),
-            name=os.getenv("WANDB_RUN_NAME", None),
+            project=project,
+            group=group,
+            name=name,
             dir=log_dir,
             config=job_config.to_dict(),
         )
@@ -271,6 +284,28 @@ def _build_metric_logger(
         metrics_rank = _get_metrics_rank(parallel_dims, job_config)
         should_log = torch.distributed.get_rank() == metrics_rank
 
+    if metrics_config.save_first_dp_and_tp and should_log:
+        # The first data-parallel group
+        is_dp_rank_0 = (
+            (
+                torch.distributed.get_rank(
+                    parallel_dims.world_mesh["dp_cp"].get_group()
+                )
+                == 0
+            )
+            if parallel_dims.dp_cp_enabled
+            else True
+        )
+        is_tp_rank_0 = (
+            (
+                torch.distributed.get_rank(parallel_dims.world_mesh["tp"].get_group())
+                == 0
+            )
+            if parallel_dims.tp_enabled
+            else True
+        )
+        should_log = is_dp_rank_0 and is_tp_rank_0
+
     logger.debug(
         f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
     )
@@ -302,8 +337,13 @@ def _build_metric_logger(
     # Create loggers in priority order
     if metrics_config.enable_wandb:
         logger.debug("Attempting to create WandB logger")
+        project = metrics_config.wandb_project
+        group = metrics_config.wandb_group
+        name = metrics_config.wandb_name
         try:
-            wandb_logger = WandBLogger(base_log_dir, job_config, tag)
+            wandb_logger = WandBLogger(
+                base_log_dir, job_config, tag, project, group, name
+            )
             logger_container.add_logger(wandb_logger)
         except Exception as e:
             if "No module named 'wandb'" in str(e):
@@ -373,6 +413,8 @@ class MetricsProcessor:
         )
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
+        self.optim_step_times = []
+        self.fwd_bwd_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
@@ -390,8 +432,9 @@ class MetricsProcessor:
         step: int,
         global_avg_loss: float,
         global_max_loss: float,
-        grad_norm: float,
+        grad_norm: float | None,
         extra_metrics: dict[str, Any] | None = None,
+        extra_print_data: str = "",
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
@@ -413,6 +456,26 @@ class MetricsProcessor:
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
 
+        # Lets also compute the "tps and mfu" without the data loading time and optim step time
+        time_optim_step = sum(self.optim_step_times) / len(self.optim_step_times)
+        time_optim_step_pct = 100 * sum(self.optim_step_times) / time_delta
+
+        time_fwd_bwd = sum(self.fwd_bwd_times) / len(self.fwd_bwd_times)
+        time_fwd_bwd_pct = 100 * sum(self.fwd_bwd_times) / time_delta
+
+        # dont use this for now, because due to some overlap, the total percentage is already over 100%
+        # so `others` here is not really meaningful
+        # others_time_pct = (
+        #     100 - time_data_loading_pct - time_optim_step_pct - time_fwd_bwd_pct
+        # )
+        # others_time = time_end_to_end * others_time_pct / 100
+
+        iso_tps = self.ntokens_since_last_log / (
+            sum(self.fwd_bwd_times) * self.parallel_dims.non_data_parallel_size
+        )
+        iso_tflops = self.num_flops_per_token * iso_tps / 1e12
+        iso_mfu = 100 * self.num_flops_per_token * iso_tps / self.gpu_peak_flops
+
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
@@ -420,9 +483,18 @@ class MetricsProcessor:
             "throughput(tps)": tps,
             "tflops": tflops,
             "mfu(%)": mfu,
+            "iso_throughput(tps)": iso_tps,
+            "iso_tflops": iso_tflops,
+            "iso_mfu(%)": iso_mfu,
             "time_metrics/end_to_end(s)": time_end_to_end,
             "time_metrics/data_loading(s)": time_data_loading,
             "time_metrics/data_loading(%)": time_data_loading_pct,
+            "time_metrics/optim_step(s)": time_optim_step,
+            "time_metrics/optim_step(%)": time_optim_step_pct,
+            "time_metrics/fwd_bwd(s)": time_fwd_bwd,
+            "time_metrics/fwd_bwd(%)": time_fwd_bwd_pct,
+            # "time_metrics/others(s)": others_time,
+            # "time_metrics/others(%)": others_time_pct,
             "memory/max_active(GiB)": device_mem_stats.max_active_gib,
             "memory/max_active(%)": device_mem_stats.max_active_pct,
             "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
@@ -430,6 +502,12 @@ class MetricsProcessor:
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
+
+        if grad_norm is None:
+            del metrics["grad_norm"]
+            grad_norm_str = ""
+        else:
+            grad_norm_str = f"{self.color.orange}grad_norm: {grad_norm:7.4f}  "
 
         if extra_metrics:
             metrics.update(extra_metrics)
@@ -440,16 +518,22 @@ class MetricsProcessor:
         logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
-            f"{color.orange}grad_norm: {grad_norm:7.4f}  "
+            f"{grad_norm_str}"
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            f"{color.magenta}mfu: {mfu:.2f}% | "
+            f"{color.yellow}iso_tps: {round(iso_tps):,}  "
+            f"{color.cyan}iso_tflops: {iso_tflops:,.2f}  "
+            f"{color.magenta}iso_mfu: {iso_mfu:.2f}%{color.reset}"
+            f"{extra_print_data}"
         )
 
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
+        self.optim_step_times.clear()
+        self.fwd_bwd_times.clear()
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

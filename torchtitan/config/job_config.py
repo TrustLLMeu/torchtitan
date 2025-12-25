@@ -76,6 +76,20 @@ class Metrics:
     log_freq: int = 10
     """How often to log metrics to TensorBoard, in iterations"""
 
+    log_norm_freq: int = 0
+    """How often to log parameter norm metrics to TensorBoard, in iterations"""
+
+    norms_to_log: list[str] = field(default_factory=lambda: ["default"])
+    """
+    Which parameter norms to log. If "all" or "everything" is specified,
+    log all available norms. If "default" is specified, use the following:
+    - "rms_to_rms"
+    - "l1_to_rms"
+    - "rms_to_inf"
+    - "supremum"
+    - "condition_number"
+    """
+
     enable_tensorboard: bool = False
     """Whether to log metrics to TensorBoard"""
 
@@ -93,8 +107,88 @@ class Metrics:
     only stage that computes loss metrics.
     """
 
+    save_first_dp_and_tp: bool = False
+    """
+    Whether to save metrics only for DP+CP+TP rank 0, meaning that the
+    0th rank of all PP stages will end up saving metrics.
+    """
+
     enable_wandb: bool = False
     """Whether to log metrics to Weights & Biases"""
+
+    wandb_project: str | None = None
+    """
+    Weights & Biases project name. Use "torchtitan" if neither this is given
+    nor the `WANDB_PROJECT` environment variable set.
+    """
+
+    wandb_group: str | None = None
+    """Weights & Biases group name"""
+
+    wandb_name: str | None = None
+    """
+    Weights & Biases run name. Use `None` if neither this is given
+    nor the `WANDB_RUN_NAME` environment variable set.
+    """
+
+
+@dataclass
+class ModelInitArgs:
+    depth_init: Literal["identity", "relative_depth", "total_depth"] = "identity"
+    """
+    Method to use for depth-wise residual initialization of Transformer blocks.
+    - "identity": disable depth-wise initialization.
+    - "relative_depth": scale each block's initialization by its own depth in the model.
+    - "total_depth": scale each block's initialization by the total number of layers.
+    """
+
+    first_in_init_fn_type: str = "normal"
+    """Weight initialization method to use for the first input layer."""
+
+    first_in_init_std: float = 1.0
+    """Standard deviation multiplier for first input layer's weight initialization."""
+
+    first_in_exp: float = 0.0
+    """
+    Exponent applied to the first input layer's input dimensionality to obtain its init std factor.
+    """
+
+    router_init_fn_type: str = "normal"
+    """Weight initialization method to use for router layers."""
+
+    intermediate_init_fn_type: str = "normal"
+    """Weight initialization method to use for the intermediate layers."""
+
+    intermediate_init_std: float = 0.02
+    """Standard deviation multiplier for intermediate layers' weight initialization."""
+
+    intermediate_exp: float = 0.0
+    """
+    Exponent applied to the model's hidden dimensionality to obtain intermediate layers' init std
+    factors.
+    """
+
+    init_gate_as_residual: bool = True
+    """Whether to initialize the GLU gate as if it was a residual layer."""
+
+    final_out_init_fn_type: str = "trunc_normal"
+    """Weight initialization method to use for the final output layer."""
+
+    final_out_init_std: float = 1.0
+    """Standard deviation multiplier for final output layer's weight initialization."""
+
+    final_out_exp: float = -0.5
+    """
+    Exponent applied to the final output layer's input dimensionality to obtain its init std factor.
+    """
+
+    residual_scale: Literal["identity", "depth_scale", "complete_p"] = "identity"
+    """
+    Which method to use for scaling residual connections in the forward pass.
+    - "identity": no scaling
+    - "depth_scale": see Modular Norms paper (arXiv:2405.14813)
+    - "complete_p": see CompleteP paper (arXiv:2505.01618)
+    """
 
 
 @dataclass
@@ -116,6 +210,32 @@ class Model:
     """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
+    model_init_args: ModelInitArgs = field(default_factory=ModelInitArgs)
+    """Model initialization arguments"""
+
+    activation_type: str = "silu"
+    """Type of activation function to use
+    [silu, squared_relu, elu, relu, selu, gelu, approx_gelu, quick_gelu, sigmoid]
+    """
+
+    norm_type: str = "rmsnorm"
+    """
+    Type of layer normalization to use
+    [layernorm, np_layernorm, rmsnorm, np_rmsnorm, ss_rmsnorm]
+    """
+
+    vocab_size: int | None = None
+    """
+    Whether to set the vocabulary size to the given value. If -1, take
+    the value from the tokenizer.
+    """
+
+    vocab_size_multiple_of: int = 1
+    """
+    Whether to pad the vocabulary size so it becomes divisible by the
+    given value (e.g., 128).
+    """
+
     converters: list[str] = field(default_factory=list)
     """
     Comma separated list of converters to apply to the model.
@@ -129,6 +249,12 @@ class Model:
     If true, model definition will be printed to stdout after all model
     converters have been applied.
     """
+
+    moe_router_bias_update_norm_factor: str | None = None
+    """MoE bias update norm factor to use"""
+
+    moe_router_scaling_factor: float | None = None
+    """MoE router scaling factor to use"""
 
 
 @dataclass
@@ -148,6 +274,33 @@ class Optimizer:
 
     weight_decay: float = 0.1
     """Weight decay to use"""
+
+    mup_width_multiplier: float = 1.0
+    """
+    Width multiplier for the model to apply μP scaling (only used
+    for Adam/Muon-based optimizers).
+    """
+
+    is_light: bool = False
+    """Whether to use Scion's light (memory-saving) version"""
+
+    norm_factor: str = "spectral"
+    """Which norm factor to use"""
+
+    zeropower_backend: str = "newtonschulz5"
+    "Which `zeropower_backend` to use."
+
+    backend_steps: int = 5
+    """Number of steps for the DiSCO backend"""
+
+    momentum: float = 0.95
+    """DiSCO momentum to use"""
+
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in DiSCO"""
+
+    extra_param_group_split_rules: list[dict[str, Any]] | None = None
+    """Extra parameter group splitting rules for DiSCO optimizers"""
 
     implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     """
@@ -200,13 +353,65 @@ class LRScheduler:
 
 @dataclass
 class Training:
-    dataset: str = "c4_test"
+    dataset: list[str] = field(default_factory=lambda: ["c4_test"])
     """Dataset to use"""
 
-    dataset_path: str | None = None
+    dataset_path: list[str] | None = None
     """
     Path to the dataset in the file system. If provided, data will be
     loaded from this path instead of downloaded.
+    Entries with string "None" will be replaced with the Python literal `None`.
+    """
+
+    dataset_num_workers: int = 0
+    """Number of data loader workers"""
+
+    dataset_prefetch_factor: int | None = 2
+    """Prefetch factor for the data loader"""
+
+    dataset_pin_memory: bool = False
+    """Whether to use memory pinning in the data loader"""
+
+    dataset_shuffle_buffer_size: int = 0
+    """Buffer size of windowed shuffling buffer. 0 means no shuffling (the default)."""
+
+    dataset_weights: list[str] | None = None
+    """
+    Probability of sampling from each dataset, separated by commas.
+    If not given, sample uniformly.
+    """
+
+    dataset_mix_in_seq: bool = False
+    """
+    Whether to also mix datasets in the sequence dimension during
+    packing. If not given, only mix in batch dimension.
+    """
+
+    dataset_inner_name: list[str] | None = None
+    """
+    Dataset name to use (`name` argument of `datasets.load_dataset`).
+    Entries with string "None" will be replaced with the Python literal `None`.
+    """
+
+    dataset_files: list[str] | None = None
+    """Dataset files to use (only necessary for certain types of datasets)"""
+
+    dataset_split: list[str] = field(default_factory=lambda: ["train"])
+    """Dataset split to use"""
+
+    dataset_streaming: bool = False
+    """Whether to stream the dataset"""
+
+    dataset_key: list[str] = field(default_factory=lambda: ["text"])
+    """Key to use for extracting the relevant text data from the dataset's samples"""
+
+    data_mixing_scheduler_configs: str | None = None
+    """Path to the mixing scheduler configs file
+    The mixing scheduler configs file should be a JSON file with the following format:
+    {
+        "step": [weights_for_dataset_0, weights_for_dataset_1, ...],
+    }
+    and key "0" must exist.
     """
 
     local_batch_size: int = 8
@@ -219,6 +424,18 @@ class Training:
 
     seq_len: int = 2048
     """Sequence length"""
+
+    num_mtp_tokens: int = 0
+    """Number of tokens to predict at once using multi-token prediction."""
+
+    mtp_loss_weight: float = 0.3
+    """Weight of multi-token prediction loss term."""
+
+    load_balance_loss_weight: float | None = None
+    """Weight of MoE auxiliary loss term."""
+
+    load_balance_coeff: float = 0.001
+    """Speed of MoE router bias update."""
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
@@ -312,6 +529,12 @@ class Parallelism:
 
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
+
+    tensor_parallel_only_attention: bool = False
+    """Whether to only apply tensor parallelism to the Attention part of the model."""
+
+    enable_approx_mid_norm_for_tensor_parallel: bool = False
+    """Whether to use an approximate mid-norm with tensor parallelism."""
 
     pipeline_parallel_degree: int = 1
     """
@@ -497,7 +720,7 @@ class Checkpoint:
     this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
     """
 
-    last_save_model_only: bool = True
+    last_save_model_only: bool = False
     """
     When last_save_model_only=True, only the model will be saved at the end of training,
     the last save.  With this, checkpoints can be loaded using `torch.load(..., weights_only=True)`
@@ -555,6 +778,12 @@ class Checkpoint:
     Exclude specific keys from being loaded from the checkpoint.
     Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
     This will load the model only, excluding the specified keys.
+    """
+
+    reconfigure_lrs: bool = False
+    """
+    Whether _not_ to load LRs from the checkpoint, but instead use those specified in
+    the current job's config.
     """
 
     enable_first_step_checkpoint: bool = False
@@ -745,12 +974,20 @@ class MXGroupedMM:
 
 
 @dataclass
+class BitNetLinear:
+    precompute_bitnet_scale_for_fsdp: bool = False
+    """Whether to precompute BitNet scales dynamically for FSDP"""
+
+
+@dataclass
 class QuantizedLinear:
     float8: Float8Linear = field(default_factory=Float8Linear)
     """FP8 training config for nn.Linear layers"""
 
     mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
+
+    bitnet: BitNetLinear = field(default_factory=BitNetLinear)
 
 
 @dataclass
@@ -877,6 +1114,27 @@ class Validation:
     dataset_path: str | None = None
     """Path to dataset to use for validation"""
 
+    dataset_num_workers: int = 0
+    """Number of validation data loader workers"""
+
+    dataset_pin_memory: bool = False
+    """Whether to use memory pinning in the validation data loader"""
+
+    dataset_inner_name: str | None = None
+    """Dataset name to use for validation (`name` argument of `datasets.load_dataset`)"""
+
+    dataset_files: list[str] | None = None
+    """Dataset files to use for validation (only necessary for certain types of datasets)"""
+
+    dataset_split: str = "train"
+    """Dataset split to use for validation"""
+
+    dataset_streaming: bool = False
+    """Whether to stream the validation dataset"""
+
+    dataset_key: str = "text"
+    """Key to use for extracting the relevant text data from the validation dataset's samples"""
+
     local_batch_size: int = 8
     """Batch size for validation"""
 
@@ -945,7 +1203,10 @@ class JobConfig:
 
     def maybe_log(self) -> None:
         if self.job.print_config:
-            logger.info(f"Running with configs: {self.to_dict()}")
+            logger.info(
+                "Running with configs:\n%s",
+                json.dumps(self.to_dict(), indent=2, ensure_ascii=False),
+            )
 
         if self.job.save_config_file is not None:
             config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)

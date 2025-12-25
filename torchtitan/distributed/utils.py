@@ -222,7 +222,10 @@ def create_context_parallel_ctx(
 
 def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]:
     @contextlib.contextmanager
-    def context(cp_context: Generator[None, None, None] | None = None):
+    def context(
+        cp_context: Generator[None, None, None] | None = None,
+        activations_handling_ctx: contextlib.AbstractContextManager | None = None,
+    ):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
@@ -230,9 +233,34 @@ def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]
             if cp_context:
                 stack.enter_context(cp_context)
 
+            if activations_handling_ctx is not None:
+                stack.enter_context(activations_handling_ctx)
+
             yield
 
     return context
+
+
+def get_param_dtype(module: torch.nn.Module) -> torch.dtype | None:
+    """Return the dtype of the parameters of the given module in the
+    forward call, based on its mixed-precision policy or its first
+    parameter as per `module.parameters()`. If the module has no
+    parameters, return `None`.
+    """
+    fsdp_state_fn = getattr(module, "_get_fsdp_state", None)
+    param_dtype = None
+    if fsdp_state_fn is not None:
+        fsdp_state = fsdp_state_fn()
+        param_dtype = fsdp_state._mp_policy.param_dtype
+    # In the non-FSDP case or if the mixed-precision policy didn't set a
+    # `param_dtype`, check via model parameters.
+    if param_dtype is None:
+        first_param = next(module.parameters(), None)
+        if first_param is None:
+            param_dtype = None
+        else:
+            param_dtype = first_param.dtype
+    return param_dtype
 
 
 def maybe_enable_amp(
