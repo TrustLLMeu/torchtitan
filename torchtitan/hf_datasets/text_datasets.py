@@ -269,6 +269,9 @@ class MixedDataset(IterableDataset, Stateful):
             len(self.datasets), dtype=torch.int64
         ).share_memory_()
 
+        # Flags for  "exhausted"  datasets
+        self.removed = torch.zeros(len(self.datasets), dtype=torch.bool).share_memory_()
+
         self._dataset_indices = list(range(len(self.datasets)))
         self._sample_idx = 0
         self._data_iters = None
@@ -289,10 +292,12 @@ class MixedDataset(IterableDataset, Stateful):
         return dataset_index
 
     def set_weights(self, weights: list[float]):
-        assert len(weights) == len(
-            self.datasets
-        ), "weights must have the same length as datasets"
-        self.weights.copy_(torch.tensor(weights, dtype=torch.float64))
+        assert len(weights) == len(self.datasets), (
+            "weights must have the same length as datasets"
+        )
+        w = torch.tensor(weights, dtype=torch.float64)
+        w[self.removed] = 0.0
+        self.weights.copy_(w)
 
     def _get_next(self, dataset_index: int):
         data_iter = self._data_iters[dataset_index]
@@ -304,6 +309,7 @@ class MixedDataset(IterableDataset, Stateful):
                 f"Removing {dataset.dataset_name} | {dataset.dataset_path} from data mix."
             )
             self.weights[dataset_index] = 0.0
+            self.removed[dataset_index] = True
             return None
 
     def __iter__(self):
@@ -339,6 +345,20 @@ class MixedDataset(IterableDataset, Stateful):
             self.weights.copy_(loaded_weights)
         else:
             self.weights.copy_(torch.tensor(loaded_weights, dtype=torch.float64))
+
+        loaded_removed = state_dict.get("removed", None)
+        if loaded_removed is None:
+            # Old checkpoints: nothing was sticky; start with "nothing removed".
+            self.removed.zero_()
+        else:
+            if isinstance(loaded_removed, torch.Tensor):
+                self.removed.copy_(loaded_removed.to(dtype=torch.bool))
+            else:
+                self.removed.copy_(torch.tensor(loaded_removed, dtype=torch.bool))
+
+        self.weights[self.removed] = 0.0
+
+        # NOTE: num_sampled_per_dataset is sticky.
         self.num_sampled_per_dataset.copy_(state_dict["num_sampled_per_dataset"])
 
         state_dict["rng_state"] = list_tree_to_tuple(state_dict["rng_state"])
@@ -354,6 +374,7 @@ class MixedDataset(IterableDataset, Stateful):
         return {
             "sample_idx": self._sample_idx,
             "weights": self.weights.tolist(),
+            "removed": self.removed.tolist(),
             "num_sampled_per_dataset": self.num_sampled_per_dataset,
             "datasets": {
                 dataset.dataset_name: dataset.state_dict() for dataset in self.datasets
@@ -573,9 +594,9 @@ def build_text_dataloader(
     )
 
     if len(dataset_name) > 1:
-        assert (
-            dataset_files is None
-        ), "cannot supply dataset files when using multiple datasets"
+        assert dataset_files is None, (
+            "cannot supply dataset files when using multiple datasets"
+        )
     for d in [
         dataset_path,
         dataset_inner_name,
@@ -583,9 +604,9 @@ def build_text_dataloader(
         dataset_key,
         dataset_weights,
     ]:
-        assert (
-            len(d) == normed_list_length
-        ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        assert len(d) == normed_list_length, (
+            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        )
     hf_datasets = []
     for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
