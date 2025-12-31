@@ -738,19 +738,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ##############################################################
             # to communicate the data sampled across ranks
             keys = sorted(data_sampled.keys())
-            sum_data_sampled = torch.stack([data_sampled[k] for k in keys]).to(self.device)
+            keys_actual_sample_ratio = [
+                k.replace("data_sampled/", "actual_sample_ratio/") for k in keys
+            ]
+            sum_data_sampled = torch.stack([data_sampled[k] for k in keys]).to(
+                self.device
+            )
 
             torch.distributed.all_reduce(
                 sum_data_sampled,
                 group=parallel_dims.world_mesh["dp_cp"].get_group(),
                 op=torch.distributed.ReduceOp.SUM,
             )
+            total_data_sampled = sum_data_sampled.sum() / 100
 
-            data_sampled = {k: int(sum_data_sampled[i].item()) for i, k in enumerate(keys)}
+            data_sampled = {
+                k: int(sum_data_sampled[i].item()) for i, k in enumerate(keys)
+            }
+            actual_sample_ratio = sum_data_sampled / total_data_sampled
+            actual_sample_ratio_dict = {
+                k: actual_sample_ratio[i].item()
+                for i, k in enumerate(keys_actual_sample_ratio)
+            }
 
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
+            actual_sample_ratio_dict = {}
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -759,6 +773,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_metrics.update(self.optimizers.get_lrs())
         extra_metrics.update(data_mix)
         extra_metrics.update(data_sampled)
+        extra_metrics.update(actual_sample_ratio_dict)
 
         if need_to_calculate_norm:
             param_norms = self.optimizers.get_parameter_norms()

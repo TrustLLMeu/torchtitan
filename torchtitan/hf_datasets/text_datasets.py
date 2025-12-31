@@ -292,9 +292,9 @@ class MixedDataset(IterableDataset, Stateful):
         return dataset_index
 
     def set_weights(self, weights: list[float]):
-        assert len(weights) == len(self.datasets), (
-            "weights must have the same length as datasets"
-        )
+        assert len(weights) == len(
+            self.datasets
+        ), "weights must have the same length as datasets"
         w = torch.tensor(weights, dtype=torch.float64)
         w[self.removed] = 0.0
         self.weights.copy_(w)
@@ -364,9 +364,20 @@ class MixedDataset(IterableDataset, Stateful):
         state_dict["rng_state"] = list_tree_to_tuple(state_dict["rng_state"])
         self._rng.setstate(state_dict["rng_state"])
         # Restore sub-datasets.
-        dataset_dicts = state_dict["datasets"]
-        for dataset in self.datasets:
-            dataset.load_state_dict(dataset_dicts[dataset.dataset_name])
+        dataset_states = state_dict["datasets"]
+
+        if not isinstance(dataset_states, list):
+            raise TypeError(
+                f"Unsupported datasets state type: {type(dataset_states)}. "
+                "This checkpoint was likely produced by an older version; please restart from scratch."
+            )
+
+        if len(dataset_states) != len(self.datasets):
+            raise ValueError(
+                f"Checkpoint has {len(dataset_states)} dataset states, but current config has {len(self.datasets)}."
+            )
+        for dataset, ds_state in zip(self.datasets, dataset_states):
+            dataset.load_state_dict(ds_state)
         # Unset data iterators so they will be re-initialized.
         self._data_iters = None
 
@@ -376,9 +387,7 @@ class MixedDataset(IterableDataset, Stateful):
             "weights": self.weights.tolist(),
             "removed": self.removed.tolist(),
             "num_sampled_per_dataset": self.num_sampled_per_dataset,
-            "datasets": {
-                dataset.dataset_name: dataset.state_dict() for dataset in self.datasets
-            },
+            "datasets": [dataset.state_dict() for dataset in self.datasets],
             "rng_state": self._rng.getstate(),
         }
 
@@ -594,9 +603,9 @@ def build_text_dataloader(
     )
 
     if len(dataset_name) > 1:
-        assert dataset_files is None, (
-            "cannot supply dataset files when using multiple datasets"
-        )
+        assert (
+            dataset_files is None
+        ), "cannot supply dataset files when using multiple datasets"
     for d in [
         dataset_path,
         dataset_inner_name,
@@ -604,9 +613,9 @@ def build_text_dataloader(
         dataset_key,
         dataset_weights,
     ]:
-        assert len(d) == normed_list_length, (
-            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
-        )
+        assert (
+            len(d) == normed_list_length
+        ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
     hf_datasets = []
     for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
