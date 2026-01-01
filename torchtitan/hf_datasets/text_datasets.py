@@ -276,6 +276,7 @@ class MixedDataset(IterableDataset, Stateful):
         self._sample_idx = 0
         self._data_iters = None
         self._rng = Random(seed + dp_rank)
+        self.dp_rank = dp_rank
 
     @property
     def normed_weights(self):
@@ -292,9 +293,9 @@ class MixedDataset(IterableDataset, Stateful):
         return dataset_index
 
     def set_weights(self, weights: list[float]):
-        assert len(weights) == len(
-            self.datasets
-        ), "weights must have the same length as datasets"
+        assert len(weights) == len(self.datasets), (
+            "weights must have the same length as datasets"
+        )
         w = torch.tensor(weights, dtype=torch.float64)
         w[self.removed] = 0.0
         self.weights.copy_(w)
@@ -366,18 +367,41 @@ class MixedDataset(IterableDataset, Stateful):
         # Restore sub-datasets.
         dataset_states = state_dict["datasets"]
 
-        if not isinstance(dataset_states, list):
+        if isinstance(dataset_states, list):
+            if len(dataset_states) != len(self.datasets):
+                raise ValueError(
+                    f"Checkpoint has {len(dataset_states)} dataset states, but current config has {len(self.datasets)}."
+                )
+            for dataset, ds_state in zip(self.datasets, dataset_states):
+                dataset.load_state_dict(ds_state)
+
+        elif isinstance(dataset_states, dict):
+            # here is a monkey patch to fix the wrong checkpoint state
+            import os
+
+            recovery_dir = os.environ["RECOVERY_IDX_DIR"]
+            recovered_state = torch.load(f"{recovery_dir}/finished-{self.dp_rank}.pt")
+            assert len(recovered_state) == len(self.datasets), (
+                f"Recovered state has {len(recovered_state)} datasets, but current config has {len(self.datasets)}."
+            )
+            for i, dataset in enumerate(self.datasets):
+                ds_state = recovered_state[i]
+                if ds_state is not None:
+                    # this datasets is sampled, so we need to load the state
+                    dataset.load_state_dict(ds_state)
+                    logger.info(
+                        f" ** reuming from recovery index for dataset-index {i}**"
+                    )
+                else:
+                    # this datasets is not sampled, no need to load the state
+                    pass
+
+        else:
             raise TypeError(
                 f"Unsupported datasets state type: {type(dataset_states)}. "
                 "This checkpoint was likely produced by an older version; please restart from scratch."
             )
 
-        if len(dataset_states) != len(self.datasets):
-            raise ValueError(
-                f"Checkpoint has {len(dataset_states)} dataset states, but current config has {len(self.datasets)}."
-            )
-        for dataset, ds_state in zip(self.datasets, dataset_states):
-            dataset.load_state_dict(ds_state)
         # Unset data iterators so they will be re-initialized.
         self._data_iters = None
 
@@ -603,9 +627,9 @@ def build_text_dataloader(
     )
 
     if len(dataset_name) > 1:
-        assert (
-            dataset_files is None
-        ), "cannot supply dataset files when using multiple datasets"
+        assert dataset_files is None, (
+            "cannot supply dataset files when using multiple datasets"
+        )
     for d in [
         dataset_path,
         dataset_inner_name,
@@ -613,9 +637,9 @@ def build_text_dataloader(
         dataset_key,
         dataset_weights,
     ]:
-        assert (
-            len(d) == normed_list_length
-        ), f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        assert len(d) == normed_list_length, (
+            f"list {d} does not match length of list of datasets (length = {normed_list_length})"
+        )
     hf_datasets = []
     for d_name, d_path, d_inner_name, d_split, d_key in zip(
         dataset_name,
