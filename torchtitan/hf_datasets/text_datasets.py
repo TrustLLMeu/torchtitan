@@ -276,6 +276,7 @@ class MixedDataset(IterableDataset, Stateful):
         self._sample_idx = 0
         self._data_iters = None
         self._rng = Random(seed + dp_rank)
+        self._dp_rank = dp_rank
 
     @property
     def normed_weights(self):
@@ -670,6 +671,20 @@ def build_text_dataloader(
     num_workers = job_config.training.dataset_num_workers
     prefetch_factor = None if num_workers == 0 else prefetch_factor
 
+    if job_config.checkpoint.enable:
+        global_batch_size = job_config.training.global_batch_size
+        if global_batch_size < 0:
+            global_batch_size = job_config.training.local_batch_size * dp_world_size
+        gradient_accumulation_steps = global_batch_size // (
+            job_config.training.local_batch_size * dp_world_size
+        )
+        ckpt_freq = job_config.checkpoint.interval * gradient_accumulation_steps
+    elif len(dataset_name) == 1:
+        ckpt_freq = 1
+    else:
+        ckpt_freq = 999999999999
+    logger.info(f" [DataLoader] snapshot_every_n_steps is set to {ckpt_freq}")
+
     return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
@@ -679,6 +694,7 @@ def build_text_dataloader(
         pin_memory=job_config.training.dataset_pin_memory,
         generator=rng,
         prefetch_factor=prefetch_factor,
+        snapshot_every_n_steps=ckpt_freq,
     )
 
 
@@ -723,6 +739,13 @@ def build_text_validation_dataloader(
     num_workers = job_config.validation.dataset_num_workers
     prefetch_factor = None if num_workers == 0 else prefetch_factor
 
+    ckpt_freq = (
+        999999999999
+        if not job_config.checkpoint.enable
+        else job_config.checkpoint.interval
+    )
+    ckpt_freq = 1 if len(dataset_name) == 1 else ckpt_freq
+    logger.info(f" [DataLoader] snapshot_every_n_steps is set to {ckpt_freq}")
     return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
@@ -731,4 +754,5 @@ def build_text_validation_dataloader(
         num_workers=job_config.validation.dataset_num_workers,
         pin_memory=job_config.validation.dataset_pin_memory,
         prefetch_factor=prefetch_factor,
+        snapshot_every_n_steps=ckpt_freq,
     )
