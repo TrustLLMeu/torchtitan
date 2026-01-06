@@ -360,7 +360,13 @@ class MixedDataset(IterableDataset, Stateful):
         self.weights[self.removed] = 0.0
 
         # NOTE: num_sampled_per_dataset is sticky.
-        self.num_sampled_per_dataset.copy_(state_dict["num_sampled_per_dataset"])
+        loaded_counts = state_dict["num_sampled_per_dataset"]
+        if isinstance(loaded_counts, torch.Tensor):
+            self.num_sampled_per_dataset.copy_(loaded_counts.to(dtype=torch.int64))
+        else:
+            self.num_sampled_per_dataset.copy_(
+                torch.tensor(loaded_counts, dtype=torch.int64)
+            )
 
         state_dict["rng_state"] = list_tree_to_tuple(state_dict["rng_state"])
         self._rng.setstate(state_dict["rng_state"])
@@ -387,7 +393,7 @@ class MixedDataset(IterableDataset, Stateful):
             "sample_idx": self._sample_idx,
             "weights": self.weights.tolist(),
             "removed": self.removed.tolist(),
-            "num_sampled_per_dataset": self.num_sampled_per_dataset,
+            "num_sampled_per_dataset": self.num_sampled_per_dataset.tolist(),
             "datasets": [dataset.state_dict() for dataset in self.datasets],
             "rng_state": self._rng.getstate(),
         }
