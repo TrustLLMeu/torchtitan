@@ -3,6 +3,7 @@
   "architectures": ["StagingMoEllamaForCausalLM"],
   "auto_map": {
     "AutoConfig": "configuration_staging_MoEllama.StagingMoEllamaConfig",
+    "AutoModel": "modeling_staging_MoEllama.StagingMoEllamaModel",
     "AutoModelForCausalLM": "modeling_staging_MoEllama.StagingMoEllamaForCausalLM"
   },
   "attention_bias": false,

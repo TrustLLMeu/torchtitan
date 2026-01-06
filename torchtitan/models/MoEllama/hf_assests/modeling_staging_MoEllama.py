@@ -251,9 +251,9 @@ class StaginMoEllamaAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        query_states = self.q_norm(query_states)
-        key_states = self.k_norm(key_states)
-        value_states = self.v_norm(value_states)
+        query_states = self.q_norm(query_states.contiguous())
+        key_states = self.k_norm(key_states.contiguous())
+        value_states = self.v_norm(value_states.contiguous())
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
@@ -399,7 +399,6 @@ class StagingMoEllamaMoE(nn.Module):
         self,
         config: StagingMoEllamaConfig,
     ):
-
         super().__init__()
         self.shared_experts = StagingMoEllamaSharedExperts(
             hidden_size=config.hidden_size,
@@ -429,8 +428,12 @@ class StagingMoEllamaMoE(nn.Module):
             route_scale=config.moe_scaling_factor,
         )
 
-        self.register_buffer(
-            "expert_bias", torch.zeros(config.n_total_experts, dtype=torch.float32)
+        # self.register_buffer(
+        #     "expert_bias", torch.zeros(config.n_total_experts, dtype=torch.float32)
+        # )
+        self.expert_bias = torch.nn.Parameter(
+            torch.zeros(config.n_total_experts, dtype=torch.float32),
+            requires_grad=False,  # set True if you trained it
         )
 
     @torch.no_grad()
@@ -491,7 +494,9 @@ class StagingMoEllamaMoE(nn.Module):
 
         # Scatter-add back to original token positions
         out = torch.zeros_like(x)
-        out = out.scatter_add(dim=0, index=token_indices_2d, src=weighted_output.to(out.dtype))
+        out = out.scatter_add(
+            dim=0, index=token_indices_2d, src=weighted_output.to(out.dtype)
+        )
 
         return out  # [T, D]
 

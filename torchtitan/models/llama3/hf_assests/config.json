@@ -3,6 +3,7 @@
   "architectures": ["StagingLlamaForCausalLM"],
   "auto_map": {
     "AutoConfig": "configuration_staging_llama.StagingLlamaConfig",
+    "AutoModel": "modeling_staging_llama.StagingLlamaModel",
     "AutoModelForCausalLM": "modeling_staging_llama.StagingLlamaForCausalLM"
   },
   "attention_bias": false,

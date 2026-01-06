@@ -277,9 +277,9 @@ class StaginLlamaAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        query_states = self.q_norm(query_states)
-        key_states = self.k_norm(key_states)
-        value_states = self.v_norm(value_states)
+        query_states = self.q_norm(query_states.contiguous())
+        key_states = self.k_norm(key_states.contiguous())
+        value_states = self.v_norm(value_states.contiguous())
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
@@ -651,8 +651,7 @@ class StagingLlamaForCausalLM(StagingLlamaPreTrainedModel, GenerationMixin):
 
 class StagingLlamaForSequenceClassification(
     GenericForSequenceClassification, StagingLlamaPreTrainedModel
-):
-    ...
+): ...
 
 
 class StagingLlamaForQuestionAnswering(
@@ -665,8 +664,7 @@ class StagingLlamaForQuestionAnswering(
 
 class StagingLlamaForTokenClassification(
     GenericForTokenClassification, StagingLlamaPreTrainedModel
-):
-    ...
+): ...
 
 
 __all__ = [
