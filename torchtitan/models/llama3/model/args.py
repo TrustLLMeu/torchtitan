@@ -7,11 +7,14 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
+import math
 from dataclasses import dataclass, field
 
 from torch import nn
 
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
+from torchtitan.models.inits import parse_depth_init
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
@@ -26,34 +29,115 @@ class RoPEScalingArgs:
 
 
 @dataclass
+class ModelInitArgs:
+    # If `True`, then each transformer block init uses its layer ID, and
+    # if `False`, each uses the total number of transformer blocks. If
+    # `None`, do not apply any depth scaling.
+    depth_init: str | None = "total_depth"
+    first_in_init_fn_type: str = "normal"
+    first_in_init_std: float = 1.0
+    # Exponent applied to the first input layer's input dimensionality
+    # to obtain its init std factor.
+    first_in_exp: float = 0.0
+    intermediate_init_fn_type: str = "trunc_normal"
+    intermediate_init_std: float = 0.02
+    # Exponent applied to the model's hidden dimensionality to obtain
+    # intermediate layers' init std factors.
+    intermediate_exp: float = 0.0
+    # Whether to initialize the GLU gate as if it was a residual layer.
+    init_gate_as_residual: bool = True
+    final_out_init_fn_type: str = "trunc_normal"
+    final_out_init_std: float = 1.0
+    # Exponent applied to the final output layer's input dimensionality
+    # to obtain its init std factor.
+    final_out_exp: float = -0.5
+    residual_scale: str = "identity"
+
+
+@dataclass
 class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
+    intermediate_size: int | None = None
+    head_dim: int | None = None
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: int | None = None
-    vocab_size: int = 128256
+    vocab_size: int = 128256  # If -1, then take vocab size from tokenizer.
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
-    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
+    rope_scaling_args: RoPEScalingArgs | None = None
 
     max_seq_len: int = 131072
-    # If `True`, then each transformer block init uses its layer ID, and if
-    # `False`, each uses the total number of transformer blocks
-    depth_init: bool = True
+
+    model_init_args: ModelInitArgs = field(default_factory=ModelInitArgs)
+    activation_type: str = "silu"
+    norm_type: str = "rmsnorm"
+    qk_norm: bool = False
+    # If this is True, it implies `qk_norm=True`.
+    norm_everywhere: bool = False
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+    pad_id: int = -1
+
+    # Number of additional modules to insert for multi-token prediction.
+    num_mtp_modules: int = 0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        self.model_init_args = job_config.model.model_init_args
+        self.activation_type = job_config.model.activation_type
+        self.norm_type = job_config.model.norm_type
+        self.qk_norm = self.qk_norm or self.norm_everywhere
+
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
             )
         self.max_seq_len = seq_len
+
+        self.num_mtp_modules = job_config.training.num_mtp_tokens
+        assert self.num_mtp_modules >= 0
+
+        self.model_init_args.depth_init = parse_depth_init(
+            self.model_init_args.depth_init
+        )
+
+        if job_config.model.vocab_size is not None:
+            self.vocab_size = job_config.model.vocab_size
+        if self.vocab_size == -1:
+            tokenizer = kwargs.get("tokenizer")
+            assert isinstance(tokenizer, BaseTokenizer), (
+                "Need a `BaseTokenizer` to be passed to `update_from_config` via the "
+                "`tokenizer` keyword argument to automatically set `vocab_size` "
+                "(since `vocab_size == -1`)."
+            )
+            self.vocab_size = tokenizer.get_vocab_size()
+            # `eos_id` is not part of the `Tokenizer` interface, so keep it
+            # optional.
+            if hasattr(tokenizer, "eos_id"):
+                self.eos_id = tokenizer.eos_id
+            # `pad_id` is not part of the `Tokenizer` interface, so keep it
+            # optional.
+            if hasattr(tokenizer, "pad_id"):
+                self.pad_id = tokenizer.pad_id
+            # Add an additional vocab element if we are explicitly
+            # supporting a pad token.
+            if self.pad_id >= 0:
+                self.vocab_size += 1
+
+        if job_config.model.vocab_size_multiple_of:
+            orig_vocab_size = self.vocab_size
+            vocab_divisor = job_config.model.vocab_size_multiple_of
+            self.vocab_size = int(
+                math.ceil(self.vocab_size / vocab_divisor) * vocab_divisor
+            )
+            logger.info(
+                f"Padded vocab size from {orig_vocab_size} to {self.vocab_size}."
+            )
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
@@ -62,7 +146,8 @@ class TransformerModelArgs(BaseModelArgs):
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    ) -> tuple[int, int, float]:
+
         return get_dense_model_nparams_and_flops(
             self,
             model,

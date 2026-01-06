@@ -57,6 +57,6 @@ class QuantizationConverter(ModelConverter):
 
 
 # Import to register quantization modules as ModelConverter
-# (imports down here to avoid circular imports with QuantizationConverter)
+import torchtitan.components.quantization.bitnet  # noqa: F401
 import torchtitan.components.quantization.float8  # noqa: F401
 import torchtitan.components.quantization.mx  # noqa: F401

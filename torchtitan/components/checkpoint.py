@@ -36,7 +36,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.config import Checkpoint as CheckpointConfig, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -236,6 +236,10 @@ class CheckpointManager:
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
             self.ft_replica_id = ft_manager.replica_id
 
+        if checkpoint_config.reconfigure_lrs:
+            optimizers.preserve_lrs_when_loading = True
+            lr_schedulers.preserve_lrs_when_loading = True
+
         async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -267,6 +271,11 @@ class CheckpointManager:
             assert (
                 sd_adapter is not None
             ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+
+        if self.last_save_model_only:
+            logger.warning(
+                f"You have set last_save_model_only to True, and last_save_in_hf to {self.last_save_in_hf}."
+            )
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
@@ -539,6 +548,39 @@ class CheckpointManager:
                 "Replica %d doesn't save checkpoint.",
                 self.ft_manager.participating_rank(),
             )
+
+    @staticmethod
+    def can_skip_weight_init(job_config: JobConfig) -> bool:
+        """Return whether the model will be loaded, so that we can skip
+        weight initialization.
+
+        In case errors would occur during loading, this also returns
+        True (i.e., weight initialization can be skipped, as if the
+        model would be loaded).
+        """
+        skip_weight_init = False
+        checkpoint_base_folder = os.path.join(
+            job_config.job.dump_folder, job_config.checkpoint.folder
+        )
+        initial_load_path = job_config.checkpoint.initial_load_path
+        load_step = job_config.checkpoint.load_step
+        if not os.path.exists(checkpoint_base_folder):
+            if initial_load_path:
+                checkpoint_id = initial_load_path
+                if not os.path.isdir(checkpoint_id):
+                    # We error out later in this case.
+                    skip_weight_init = True
+        else:
+            load_step = (
+                CheckpointManager._find_load_step(None, checkpoint_base_folder)
+                if load_step == -1
+                else load_step
+            )
+            if load_step != -1:
+                # We either error out later or load the checkpoint in
+                # this case.
+                skip_weight_init = True
+        return skip_weight_init
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
